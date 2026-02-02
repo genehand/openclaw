@@ -12,6 +12,7 @@ import {
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
+import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import {
   ErrorCodes,
   errorShape,
@@ -224,6 +225,12 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const cfg = loadConfig();
     const target = resolveGatewaySessionStoreTarget({ cfg, key });
     const storePath = target.storePath;
+
+    // Capture the previous session entry before resetting so hooks can access
+    // the old session transcript (needed by session-memory hook).
+    let previousSessionEntry: SessionEntry | undefined;
+    let previousSessionFile: string | undefined;
+
     const next = await updateSessionStore(storePath, (store) => {
       const primaryKey = target.storeKeys[0] ?? key;
       const existingKey = target.storeKeys.find((candidate) => store[candidate]);
@@ -232,6 +239,19 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         delete store[existingKey];
       }
       const entry = store[primaryKey];
+
+      // Snapshot the previous entry before overwriting
+      if (entry) {
+        previousSessionEntry = { ...entry };
+        // Resolve the transcript file path for the previous session
+        const candidates = resolveSessionTranscriptCandidates(
+          entry.sessionId,
+          storePath,
+          (entry as Record<string, unknown>).sessionFile as string | undefined,
+        );
+        previousSessionFile = candidates.find((c) => fs.existsSync(c));
+      }
+
       const now = Date.now();
       const nextEntry: SessionEntry = {
         sessionId: randomUUID(),
@@ -259,6 +279,30 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return nextEntry;
     });
     respond(true, { ok: true, key: target.canonicalKey, entry: next }, undefined);
+
+    // Fire internal hooks for the reset/new command (async, non-blocking).
+    // This matches the hook dispatch in commands-core.ts handleCommands()
+    // which only fires for message-based /new (channels), not RPC resets (TUI/webchat).
+    // Fixes: https://github.com/openclaw/openclaw/issues/6799
+    const canonicalKey = target.canonicalKey;
+    void (async () => {
+      try {
+        const hookEvent = createInternalHookEvent("command", "new", canonicalKey, {
+          previousSessionEntry: previousSessionEntry
+            ? { ...previousSessionEntry, sessionFile: previousSessionFile }
+            : undefined,
+          sessionEntry: next,
+          commandSource: "rpc",
+          cfg,
+        });
+        await triggerInternalHook(hookEvent);
+      } catch (err) {
+        console.error(
+          "[sessions.reset] Hook dispatch failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    })();
   },
   "sessions.delete": async ({ params, respond }) => {
     if (!validateSessionsDeleteParams(params)) {
