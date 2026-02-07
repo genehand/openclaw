@@ -1,8 +1,36 @@
+/**
+ * OpenAI-compatible HTTP endpoint for chat completions.
+ *
+ * This module provides an OpenAI API-compatible endpoint at `/v1/chat/completions`
+ * that forwards requests to the OpenClaw agent system.
+ *
+ * ## Internal Hook Support
+ *
+ * When users send `/new` or `/reset` commands via this endpoint, internal hooks
+ * (e.g., `session-memory`, `command-logger`) are triggered just like they are
+ * for other channels (Telegram, WhatsApp, etc.). This ensures consistent behavior
+ * across all connection types.
+ *
+ * The hook triggering:
+ * - Detects reset commands in the last user message
+ * - Captures the previous session entry before the agent runs
+ * - Fires the hook asynchronously after the agent completes (non-blocking)
+ * - Uses `commandSource: "openai-http"` to identify the origin
+ */
+
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { buildHistoryContextFromEntries, type HistoryEntry } from "../auto-reply/reply/history.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommand } from "../commands/agent.js";
+import { loadConfig } from "../config/config.js";
+import {
+  DEFAULT_RESET_TRIGGERS,
+  loadSessionStore,
+  resolveStorePath,
+  type SessionEntry,
+} from "../config/sessions.js";
+import { createInternalHookEvent, triggerInternalHook } from "../hooks/internal-hooks.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { defaultRuntime } from "../runtime.js";
 import { authorizeGatewayConnect, type ResolvedGatewayAuth } from "./auth.js";
@@ -73,9 +101,30 @@ function extractTextContent(content: unknown): string {
   return "";
 }
 
+/**
+ * Detect if a message is a reset command (/new or /reset).
+ * Returns the matched action ("new" or "reset") or undefined if not a reset command.
+ */
+function detectResetCommand(
+  text: string,
+  resetTriggers: string[] = DEFAULT_RESET_TRIGGERS,
+): string | undefined {
+  const trimmed = text.trim().toLowerCase();
+  for (const trigger of resetTriggers) {
+    const triggerLower = trigger.toLowerCase();
+    if (trimmed === triggerLower || trimmed.startsWith(`${triggerLower} `)) {
+      // Return action name without the leading slash
+      return triggerLower.replace(/^\//, "");
+    }
+  }
+  return undefined;
+}
+
 function buildAgentPrompt(messagesUnknown: unknown): {
   message: string;
   extraSystemPrompt?: string;
+  /** The raw text content of the last user message, for command detection */
+  lastUserMessage?: string;
 } {
   const messages = asMessages(messagesUnknown);
 
@@ -119,6 +168,7 @@ function buildAgentPrompt(messagesUnknown: unknown): {
   }
 
   let message = "";
+  let lastUserMessage: string | undefined;
   if (conversationEntries.length > 0) {
     let currentIndex = -1;
     for (let i = conversationEntries.length - 1; i >= 0; i -= 1) {
@@ -133,6 +183,8 @@ function buildAgentPrompt(messagesUnknown: unknown): {
     }
     const currentEntry = conversationEntries[currentIndex]?.entry;
     if (currentEntry) {
+      // Capture the last user/tool message for command detection
+      lastUserMessage = currentEntry.body;
       const historyEntries = conversationEntries.slice(0, currentIndex).map((entry) => entry.entry);
       if (historyEntries.length === 0) {
         message = currentEntry.body;
@@ -150,6 +202,7 @@ function buildAgentPrompt(messagesUnknown: unknown): {
   return {
     message,
     extraSystemPrompt: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
+    lastUserMessage,
   };
 }
 
@@ -221,6 +274,44 @@ export async function handleOpenAiHttpRequest(
   const runId = `chatcmpl_${randomUUID()}`;
   const deps = createDefaultDeps();
 
+  // Detect reset commands (/new, /reset) and trigger internal hooks
+  const cfg = loadConfig();
+  const resetTriggers = cfg.session?.resetTriggers ?? DEFAULT_RESET_TRIGGERS;
+  const resetAction = prompt.lastUserMessage
+    ? detectResetCommand(prompt.lastUserMessage, resetTriggers)
+    : undefined;
+
+  let previousSessionEntry: SessionEntry | undefined;
+  if (resetAction) {
+    // Capture the previous session entry before reset for hooks
+    const storePath = resolveStorePath(cfg.session?.store, { agentId });
+    const sessionStore = loadSessionStore(storePath);
+    previousSessionEntry = sessionStore[sessionKey] ? { ...sessionStore[sessionKey] } : undefined;
+  }
+
+  // Fire hook after agent completes (non-blocking)
+  const fireResetHook = (sessionEntry?: SessionEntry) => {
+    if (!resetAction) {
+      return;
+    }
+    void (async () => {
+      try {
+        const hookEvent = createInternalHookEvent("command", resetAction, sessionKey, {
+          previousSessionEntry,
+          sessionEntry,
+          commandSource: "openai-http",
+          cfg,
+        });
+        await triggerInternalHook(hookEvent);
+      } catch (err) {
+        console.error(
+          "[openai-http] Hook dispatch failed:",
+          err instanceof Error ? (err.stack ?? err.message) : String(err),
+        );
+      }
+    })();
+  };
+
   if (!stream) {
     try {
       const result = await agentCommand(
@@ -236,6 +327,10 @@ export async function handleOpenAiHttpRequest(
         defaultRuntime,
         deps,
       );
+
+      // Fire hook for reset commands after agent completes
+      const sessionEntry = (result as { sessionEntry?: SessionEntry } | null)?.sessionEntry;
+      fireResetHook(sessionEntry);
 
       const payloads = (result as { payloads?: Array<{ text?: string }> } | null)?.payloads;
       const content =
@@ -349,6 +444,10 @@ export async function handleOpenAiHttpRequest(
         defaultRuntime,
         deps,
       );
+
+      // Fire hook for reset commands after agent completes
+      const sessionEntry = (result as { sessionEntry?: SessionEntry } | null)?.sessionEntry;
+      fireResetHook(sessionEntry);
 
       if (closed) {
         return;
