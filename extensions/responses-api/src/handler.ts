@@ -280,6 +280,64 @@ async function resolveMediaUrls(urls: string[], gatewayBaseUrl: string): Promise
   return Promise.all(urls.map((u) => resolveMediaUrl(u, gatewayBaseUrl)));
 }
 
+/**
+ * Extract MEDIA: tokens that the core security filter rejected (absolute/~ paths)
+ * but that we can safely resolve for this channel. The core `splitMediaFromOutput`
+ * only allows `./relative` paths and http(s):// URLs; everything else stays in the
+ * text verbatim. We re-scan the text for those leftover tokens, resolve each via
+ * `saveMediaSource`, strip the token lines from the text, and return resolved URLs.
+ */
+const MEDIA_LEFTOVER_RE = /^[ \t]*MEDIA:\s*`?([^\n]+?)`?\s*$/gim;
+
+async function extractLeftoverMediaTokens(
+  text: string,
+  gatewayBaseUrl: string,
+): Promise<{ text: string; mediaUrls: string[] }> {
+  const urls: string[] = [];
+  const cleaned = text.replace(MEDIA_LEFTOVER_RE, (match, raw: string) => {
+    const candidate = raw
+      .replace(/^[`"'[{(]+/, "")
+      .replace(/[`"'\\})\],]+$/, "")
+      .trim();
+    // Only handle local paths that the core filter rejected
+    if (!candidate || isRemoteUrl(candidate)) {
+      return match; // leave remote URLs alone (they should have been handled)
+    }
+    const filePath = candidate.startsWith("file://") ? candidate.slice(7) : candidate;
+    // Must look like an absolute or home-relative path
+    if (filePath.startsWith("/") || filePath.startsWith("~")) {
+      urls.push(filePath);
+      return ""; // strip the line
+    }
+    return match; // leave other tokens (e.g. already-valid ./relative) alone
+  });
+
+  if (urls.length === 0) {
+    return { text, mediaUrls: [] };
+  }
+
+  console.log(
+    `[responses-api] extractLeftoverMediaTokens found ${urls.length} absolute paths:`,
+    urls,
+  );
+
+  const resolved = await Promise.all(
+    urls.map(async (filePath) => {
+      try {
+        const saved = await saveMediaSource(filePath, undefined, "outbound");
+        return `${gatewayBaseUrl}/media/outbound/${saved.id}`;
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  return {
+    text: cleaned.replace(/\n{3,}/g, "\n\n").trim(),
+    mediaUrls: resolved.filter((u): u is string => u !== null),
+  };
+}
+
 // -- Responses API response formatting --------------------------------------
 
 type Usage = { input_tokens: number; output_tokens: number; total_tokens: number };
@@ -364,9 +422,18 @@ function formatMediaAsMarkdown(urls: string[]): string {
 }
 
 async function payloadToContent(payload: ReplyPayload, gatewayBaseUrl: string): Promise<string> {
-  const text = payload.text ?? "";
+  let text = payload.text ?? "";
   const rawUrls = collectMediaUrls(payload);
   const resolved = rawUrls.length > 0 ? await resolveMediaUrls(rawUrls, gatewayBaseUrl) : [];
+
+  // Extract MEDIA: tokens that the core security filter rejected (absolute paths)
+  const leftover = await extractLeftoverMediaTokens(text, gatewayBaseUrl);
+  console.log(
+    `[responses-api] payloadToContent: rawUrls=${rawUrls.length}, leftoverMedia=${leftover.mediaUrls.length}, resolved=${resolved.length}`,
+  );
+  text = leftover.text;
+  resolved.push(...leftover.mediaUrls);
+
   const media = formatMediaAsMarkdown(resolved);
   if (!text && !media) return "";
   if (!media) return text;
@@ -433,7 +500,7 @@ export async function handleResponsesApiRequest(
     return true;
   }
 
-  // Combine instructions with any system prompt from input
+  // Combine instructions with any system prompt from input.
   const extraSystemPrompt = [instructions, prompt.extraSystemPrompt].filter(Boolean).join("\n\n");
 
   const responseId = `resp_${randomUUID()}`;
@@ -554,7 +621,7 @@ async function handleNonStreaming(params: {
         deliver: async (payload: ReplyPayload) => {
           const urls = collectMediaUrls(payload);
           console.log(
-            `[responses-api] deliver payload: text=${(payload.text ?? "").slice(0, 80)}, mediaUrls=${JSON.stringify(urls)}`,
+            `[responses-api] deliver payload: mediaUrls=${JSON.stringify(urls)}, text=\n---\n${payload.text ?? "(empty)"}\n---`,
           );
           payloads.push(payload);
         },
@@ -571,7 +638,7 @@ async function handleNonStreaming(params: {
     const captured = collector.drain();
     console.log(
       `[responses-api] collector drained: ${captured.length} items`,
-      captured.map((c) => ({ text: c.text?.slice(0, 40), mediaUrl: c.mediaUrl })),
+      captured.map((c) => ({ text: c.text?.slice(0, 80), mediaUrl: c.mediaUrl })),
     );
     const capturedMedia = capturedOutboundToMediaUrls(captured);
 
@@ -762,14 +829,14 @@ async function handleStreaming(params: {
         ...prefixOptions,
         deliver: async (payload: ReplyPayload) => {
           const text = payload.text ?? "";
+          const rawUrls = collectMediaUrls(payload);
+          console.log(
+            `[responses-api] streaming deliver: mediaUrls=${JSON.stringify(rawUrls)}, text=\n---\n${text || "(empty)"}\n---`,
+          );
           if (text && text.length > emittedLength) {
             emitDelta(text.slice(emittedLength));
             emittedLength = text.length;
           }
-          const rawUrls = collectMediaUrls(payload);
-          console.log(
-            `[responses-api] streaming deliver: text=${text.slice(0, 80)}, mediaUrls=${JSON.stringify(rawUrls)}`,
-          );
           if (rawUrls.length > 0) {
             const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl);
             const media = formatMediaAsMarkdown(resolved);
@@ -808,12 +875,25 @@ async function handleStreaming(params: {
     const captured = collector.drain();
     console.log(
       `[responses-api] streaming collector drained: ${captured.length} items`,
-      captured.map((c) => ({ text: c.text?.slice(0, 40), mediaUrl: c.mediaUrl })),
+      captured.map((c) => ({ text: c.text?.slice(0, 80), mediaUrl: c.mediaUrl })),
+    );
+    console.log(
+      `[responses-api] streaming accumulatedText=\n---\n${accumulatedText || "(empty)"}\n---`,
     );
     const capturedMedia = capturedOutboundToMediaUrls(captured);
-    if (capturedMedia.length > 0) {
-      const resolved = await resolveMediaUrls(capturedMedia, gatewayBaseUrl);
-      const media = formatMediaAsMarkdown(resolved);
+
+    // Extract leftover MEDIA: tokens (absolute paths the core filter rejected)
+    // from the accumulated streamed text.
+    const leftover = await extractLeftoverMediaTokens(accumulatedText, gatewayBaseUrl);
+
+    // Resolve raw captured media URLs (from message send tool) via saveMediaSource
+    const resolvedCaptured =
+      capturedMedia.length > 0 ? await resolveMediaUrls(capturedMedia, gatewayBaseUrl) : [];
+    // leftover.mediaUrls are already resolved gateway URLs
+    const allMedia = [...resolvedCaptured, ...leftover.mediaUrls];
+
+    if (allMedia.length > 0) {
+      const media = formatMediaAsMarkdown(allMedia);
       if (media) {
         emitDelta(`\n\n${media}`);
       }
