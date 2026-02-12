@@ -3,12 +3,14 @@ import { randomUUID } from "node:crypto";
 import {
   DEFAULT_ACCOUNT_ID,
   createReplyPrefixOptions,
+  isSilentReplyText,
   readJsonBody,
   resolveAgentIdForRequest,
   sendJson,
   sendMethodNotAllowed,
   sendUnauthorized,
   setSseHeaders,
+  SILENT_REPLY_TOKEN,
   writeDone,
   writeSseEvent,
   type OpenClawConfig,
@@ -233,15 +235,18 @@ async function handleNonStreaming(params: {
       replyOptions: { onModelSelected },
     });
 
+    // Filter out silent replies (e.g., NO_REPLY)
+    const filteredPayloads = payloads.filter((p) => !isSilentReplyText(p.text, SILENT_REPLY_TOKEN));
+
     // Merge any media captured from the `message send` tool path.
     const captured = collector.drain();
     const capturedMedia = capturedOutboundToMediaUrls(captured);
 
     const contentParts =
-      payloads.length > 0
-        ? (await Promise.all(payloads.map((p) => payloadToContent(p, gatewayBaseUrl)))).filter(
-            Boolean,
-          )
+      filteredPayloads.length > 0
+        ? (
+            await Promise.all(filteredPayloads.map((p) => payloadToContent(p, gatewayBaseUrl)))
+          ).filter(Boolean)
         : [];
 
     // Append captured media as markdown images.
@@ -424,6 +429,10 @@ async function handleStreaming(params: {
         ...prefixOptions,
         deliver: async (payload: ReplyPayload) => {
           const rawText = payload.text ?? "";
+          // Skip silent replies (e.g., NO_REPLY)
+          if (isSilentReplyText(rawText, SILENT_REPLY_TOKEN)) {
+            return;
+          }
           const text = stripMediaTokens(rawText);
           const rawUrls = collectMediaUrls(payload);
           if (text && text.length > emittedLength) {
@@ -447,7 +456,12 @@ async function handleStreaming(params: {
       replyOptions: {
         onModelSelected,
         onPartialReply: async (payload) => {
-          const text = stripMediaTokens(payload.text ?? "");
+          const rawText = payload.text ?? "";
+          // Skip silent replies (e.g., NO_REPLY)
+          if (isSilentReplyText(rawText, SILENT_REPLY_TOKEN)) {
+            return;
+          }
+          const text = stripMediaTokens(rawText);
           if (text.length > emittedLength) {
             emitDelta(text.slice(emittedLength));
             emittedLength = text.length;
