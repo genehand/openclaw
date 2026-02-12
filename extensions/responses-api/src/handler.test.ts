@@ -1000,5 +1000,166 @@ describe("handleResponsesApiRequest", () => {
       expect(ctxArg.GroupSystemPrompt).toBe("Be concise.");
       expect(ctxArg.Body).toBe("Hello");
     });
+
+    it("uses previous_response_id to continue existing session", async () => {
+      const runtime = createMockRuntime();
+      setResponsesApiRuntime(runtime);
+
+      // First request: creates a new session
+      const req1 = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "hello" }],
+          user: "user-123",
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res1 = createMockResponse();
+      await handleResponsesApiRequest(req1, res1);
+
+      expect(res1.statusCode).toBe(200);
+      const body1 = parseResponseBody(res1._body);
+      const firstResponseId = body1.id;
+
+      // Wait for the async store operation to complete
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Second request: uses previous_response_id to continue the same session
+      const req2 = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "follow up" }],
+          previous_response_id: firstResponseId,
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res2 = createMockResponse();
+      await handleResponsesApiRequest(req2, res2);
+
+      expect(res2.statusCode).toBe(200);
+      const finalizeCalls = vi.mocked(runtime.channel.reply.finalizeInboundContext).mock.calls;
+      const ctx1 = finalizeCalls[0]?.[0] as Record<string, unknown>;
+      const ctx2 = finalizeCalls[1]?.[0] as Record<string, unknown>;
+
+      // Both requests should use the same session key (derived from first response)
+      expect(ctx1.SessionKey).toBe(ctx2.SessionKey);
+      expect(ctx2.SessionKey).toBe(`responses-api:${firstResponseId}`);
+    });
+
+    it("chains multiple responses in the same session", async () => {
+      const runtime = createMockRuntime();
+      setResponsesApiRuntime(runtime);
+
+      // Request 1: Start session
+      const req1 = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "message 1" }],
+          user: "user-456",
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res1 = createMockResponse();
+      await handleResponsesApiRequest(req1, res1);
+      const body1 = parseResponseBody(res1._body);
+
+      // Wait for the async store operation to complete
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Request 2: Continue with previous_response_id
+      const req2 = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "message 2" }],
+          previous_response_id: body1.id,
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res2 = createMockResponse();
+      await handleResponsesApiRequest(req2, res2);
+      const body2 = parseResponseBody(res2._body);
+
+      // Wait for the async store operation to complete
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Request 3: Continue with the new previous_response_id
+      const req3 = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "message 3" }],
+          previous_response_id: body2.id,
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res3 = createMockResponse();
+      await handleResponsesApiRequest(req3, res3);
+
+      const finalizeCalls = vi.mocked(runtime.channel.reply.finalizeInboundContext).mock.calls;
+      const sessionKey1 = (finalizeCalls[0]?.[0] as Record<string, unknown>).SessionKey;
+      const sessionKey2 = (finalizeCalls[1]?.[0] as Record<string, unknown>).SessionKey;
+      const sessionKey3 = (finalizeCalls[2]?.[0] as Record<string, unknown>).SessionKey;
+
+      // All three requests should use the same session key
+      expect(sessionKey1).toBe(sessionKey2);
+      expect(sessionKey2).toBe(sessionKey3);
+    });
+
+    it("creates unique session for each request without previous_response_id", async () => {
+      const runtime = createMockRuntime();
+      setResponsesApiRuntime(runtime);
+
+      // First request
+      const req1 = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "hello" }],
+          user: "user-123",
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res1 = createMockResponse();
+      await handleResponsesApiRequest(req1, res1);
+
+      // Second request (same user, no previous_response_id)
+      const req2 = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "hello again" }],
+          user: "user-123",
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res2 = createMockResponse();
+      await handleResponsesApiRequest(req2, res2);
+
+      expect(res1.statusCode).toBe(200);
+      expect(res2.statusCode).toBe(200);
+
+      const body1 = parseResponseBody(res1._body);
+      const body2 = parseResponseBody(res2._body);
+
+      const finalizeCalls = vi.mocked(runtime.channel.reply.finalizeInboundContext).mock.calls;
+      const sessionKey1 = (finalizeCalls[0]?.[0] as Record<string, unknown>).SessionKey;
+      const sessionKey2 = (finalizeCalls[1]?.[0] as Record<string, unknown>).SessionKey;
+
+      // Each request should have a unique session key based on its response ID
+      expect(sessionKey1).toBe(`responses-api:${body1.id}`);
+      expect(sessionKey2).toBe(`responses-api:${body2.id}`);
+      expect(sessionKey1).not.toBe(sessionKey2);
+    });
   });
 });
