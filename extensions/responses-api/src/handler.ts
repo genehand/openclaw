@@ -36,6 +36,7 @@ import {
   type ResponseResource,
 } from "./response.js";
 import { getResponsesApiRuntime } from "./runtime.js";
+import { lookupSessionKey, storeSessionMapping } from "./session-store.js";
 
 // -- Constants --------------------------------------------------------------
 
@@ -48,6 +49,41 @@ const MAX_BODY_BYTES = 20 * 1024 * 1024;
 /** Extract media URLs from outbound payloads captured by the collector. */
 function capturedOutboundToMediaUrls(captured: CapturedOutbound[]): string[] {
   return captured.flatMap((c) => (c.mediaUrl ? [c.mediaUrl] : []));
+}
+
+// -- Session tracking for Responses API -------------------------------------
+
+/**
+ * Resolve session key for the request, using previous_response_id if provided
+ * to maintain conversation continuity.
+ *
+ * In the Responses API:
+ * - First message: no previous_response_id → creates new session
+ * - Follow-up: includes previous_response_id → continues that session
+ * - Each response gets a new unique ID that can be used for the next turn
+ *
+ * Session mappings are persisted to disk to survive gateway restarts.
+ */
+async function resolveSessionKey(params: {
+  routeSessionKey: string;
+  previousResponseId: string | undefined;
+  responseId: string;
+  agentId: string;
+}): Promise<string> {
+  // If client provided previous_response_id, look up the session key
+  // from the persisted store to continue the conversation.
+  if (params.previousResponseId) {
+    const sessionKey = lookupSessionKey(params.previousResponseId, params.agentId);
+    if (sessionKey) {
+      return sessionKey;
+    }
+    // If not found (expired, invalid, or after restart), fall through to create new session
+  }
+
+  // No previous_response_id or not found: create a NEW unique session
+  // Each response gets its own session key - they only share history
+  // when explicitly linked via previous_response_id
+  return `responses-api:${params.responseId}`;
 }
 
 // -- Main handler -----------------------------------------------------------
@@ -94,6 +130,8 @@ export async function handleResponsesApiRequest(
   const model = typeof payload.model === "string" ? payload.model : "openclaw";
   const user = typeof payload.user === "string" ? payload.user : undefined;
   const instructions = typeof payload.instructions === "string" ? payload.instructions : undefined;
+  const previousResponseId =
+    typeof payload.previous_response_id === "string" ? payload.previous_response_id : undefined;
 
   const agentId = resolveAgentIdForRequest({ req, model });
   const prompt = buildPromptFromInput(payload.input);
@@ -120,6 +158,18 @@ export async function handleResponsesApiRequest(
     peer: { kind: "direct", id: peerId },
   });
 
+  // -- Resolve session key (with previous_response_id support) --------------
+  const sessionKey = await resolveSessionKey({
+    routeSessionKey: route.sessionKey,
+    previousResponseId,
+    responseId,
+    agentId: route.agentId,
+  });
+
+  // Store mapping so future requests with this response ID can continue the session
+  // This is fire-and-forget - we don't wait for it to complete
+  void storeSessionMapping(responseId, sessionKey, route.agentId);
+
   // -- Build MsgContext -----------------------------------------------------
   const ctx = runtime.channel.reply.finalizeInboundContext({
     Body: prompt.message,
@@ -129,7 +179,7 @@ export async function handleResponsesApiRequest(
     BodyForCommands: prompt.lastUserMessage,
     From: `${CHANNEL_ID}:${peerId}`,
     To: `${CHANNEL_ID}:api`,
-    SessionKey: route.sessionKey,
+    SessionKey: sessionKey,
     AccountId: route.accountId,
     ChatType: "direct",
     Provider: CHANNEL_ID,
