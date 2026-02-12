@@ -47,7 +47,7 @@ export const responsesApiOutbound: ChannelOutboundAdapter = {
 
   sendText: async ({ to, text }) => {
     console.log(
-      `[responses-api outbound] sendText to=${to}, text=${text?.slice(0, 60)}, hasCollector=${collectors.has(to)}`,
+      `[responses-api outbound] sendText to=${to}, text=${text?.slice(0, 100)}, hasCollector=${collectors.has(to)}`,
     );
     const queue = collectors.get(to);
     if (queue) {
@@ -58,7 +58,7 @@ export const responsesApiOutbound: ChannelOutboundAdapter = {
 
   sendMedia: async ({ to, text, mediaUrl }) => {
     console.log(
-      `[responses-api outbound] sendMedia to=${to}, mediaUrl=${mediaUrl}, text=${text?.slice(0, 60)}, hasCollector=${collectors.has(to)}`,
+      `[responses-api outbound] sendMedia to=${to}, mediaUrl=${mediaUrl}, text=${text?.slice(0, 100)}, hasCollector=${collectors.has(to)}`,
     );
     const queue = collectors.get(to);
     if (queue) {
