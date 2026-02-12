@@ -98,3 +98,11 @@ export function setSseHeaders(res: ServerResponse) {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
 }
+
+export function writeSseEvent(
+  res: ServerResponse,
+  event: { type: string; [key: string]: unknown },
+) {
+  res.write(`event: ${event.type}\n`);
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}

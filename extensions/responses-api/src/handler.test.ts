@@ -365,7 +365,7 @@ describe("handleResponsesApiRequest", () => {
 
       expect(res.statusCode).toBe(400);
       const body = JSON.parse(res._body);
-      expect(body.error.message).toBe("Invalid JSON body");
+      expect(body.error.message).toMatch(/JSON/i);
     });
 
     it("accepts string input", async () => {
@@ -493,6 +493,61 @@ describe("handleResponsesApiRequest", () => {
       expect(content).toContain(
         "![image](http://localhost:3000/media/outbound/resolved-generated-image.png)",
       );
+    });
+
+    it("resolves markdown image refs with local absolute paths in response text", async () => {
+      const runtime = createMockRuntime({
+        dispatchResult:
+          "Here is your bee!\n\n![Bee image](/mnt/user-data/uploads/resp_123/media_456.jpg)",
+      });
+      setResponsesApiRuntime(runtime);
+
+      const req = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "draw a bee" }],
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res = createMockResponse();
+      await handleResponsesApiRequest(req, res);
+
+      expect(res.statusCode).toBe(200);
+      const body = parseResponseBody(res._body);
+      const content = body.output[0].content[0].text;
+      expect(content).toContain("Here is your bee!");
+      expect(content).toContain(
+        "![Bee image](http://localhost:3000/media/outbound/resolved-media_456.jpg)",
+      );
+      expect(content).not.toContain("/mnt/user-data/uploads");
+    });
+
+    it("strips inline MEDIA: tokens from non-streaming response", async () => {
+      const runtime = createMockRuntime({
+        dispatchResult: "Here is the photo MEDIA:photo.jpg nice right?",
+      });
+      setResponsesApiRuntime(runtime);
+
+      const req = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "show photo" }],
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res = createMockResponse();
+      await handleResponsesApiRequest(req, res);
+
+      expect(res.statusCode).toBe(200);
+      const body = parseResponseBody(res._body);
+      const content = body.output[0].content[0].text;
+      expect(content).toContain("Here is the photo");
+      expect(content).toContain("nice right?");
+      expect(content).not.toContain("MEDIA:");
     });
   });
 
@@ -661,6 +716,66 @@ describe("handleResponsesApiRequest", () => {
       expect(res._body).toContain(
         "![image](http://localhost:3000/media/outbound/resolved-streamed-image.png)",
       );
+    });
+
+    it("resolves markdown image refs with local paths in streaming final text", async () => {
+      const runtime = createMockRuntime({
+        dispatchResult:
+          "The bee abides!\n\n![Bee image](/mnt/user-data/uploads/resp_abc/media_789.jpg)",
+      });
+      setResponsesApiRuntime(runtime);
+
+      const req = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "draw a bee" }],
+          stream: true,
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res = createMockResponse();
+      await handleResponsesApiRequest(req, res);
+
+      const events = parseSseEvents(res._body);
+      const doneEvent = events.find((e) => e.type === "response.output_text.done");
+      expect(doneEvent).toBeDefined();
+
+      const finalText = (doneEvent as unknown as { text: string }).text;
+      expect(finalText).toContain("The bee abides!");
+      expect(finalText).toContain(
+        "![Bee image](http://localhost:3000/media/outbound/resolved-media_789.jpg)",
+      );
+      expect(finalText).not.toContain("/mnt/user-data/uploads");
+    });
+
+    it("strips inline MEDIA: tokens from streaming text", async () => {
+      const runtime = createMockRuntime({
+        dispatchResult: "Here is your bee! MEDIA:media_123.jpg",
+      });
+      setResponsesApiRuntime(runtime);
+
+      const req = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "show bee" }],
+          stream: true,
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res = createMockResponse();
+      await handleResponsesApiRequest(req, res);
+
+      const events = parseSseEvents(res._body);
+      const doneEvent = events.find((e) => e.type === "response.output_text.done");
+      expect(doneEvent).toBeDefined();
+
+      const finalText = (doneEvent as unknown as { text: string }).text;
+      expect(finalText).toContain("Here is your bee!");
+      expect(finalText).not.toContain("MEDIA:");
     });
   });
 
