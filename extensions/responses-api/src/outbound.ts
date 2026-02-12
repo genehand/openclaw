@@ -46,9 +46,6 @@ export const responsesApiOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
 
   sendText: async ({ to, text }) => {
-    console.log(
-      `[responses-api outbound] sendText to=${to}, text=${text?.slice(0, 100)}, hasCollector=${collectors.has(to)}`,
-    );
     const queue = collectors.get(to);
     if (queue) {
       queue.push({ text });
@@ -57,9 +54,6 @@ export const responsesApiOutbound: ChannelOutboundAdapter = {
   },
 
   sendMedia: async ({ to, text, mediaUrl }) => {
-    console.log(
-      `[responses-api outbound] sendMedia to=${to}, mediaUrl=${mediaUrl}, text=${text?.slice(0, 100)}, hasCollector=${collectors.has(to)}`,
-    );
     const queue = collectors.get(to);
     if (queue) {
       queue.push({ text, mediaUrl });

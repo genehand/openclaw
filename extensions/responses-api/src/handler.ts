@@ -1,451 +1,54 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { timingSafeEqual } from "node:crypto";
 import {
   DEFAULT_ACCOUNT_ID,
   createReplyPrefixOptions,
-  saveMediaSource,
+  readJsonBody,
+  resolveAgentIdForRequest,
+  sendJson,
+  sendMethodNotAllowed,
+  sendUnauthorized,
+  setSseHeaders,
+  writeDone,
+  writeSseEvent,
   type OpenClawConfig,
   type PluginRuntime,
   type ReplyPayload,
 } from "openclaw/plugin-sdk";
+import { authorize, getBearerToken } from "./auth.js";
+import { coerceRequest, buildPromptFromInput } from "./input.js";
+import {
+  deriveGatewayBaseUrl,
+  resolveMediaUrls,
+  extractLeftoverMediaTokens,
+  stripMediaTokens,
+  resolveLocalMarkdownImages,
+  collectMediaUrls,
+  formatMediaAsMarkdown,
+  payloadToContent,
+} from "./media.js";
 import { registerOutboundCollector, type CapturedOutbound } from "./outbound.js";
+import {
+  createResponseResource,
+  createAssistantOutputItem,
+  type ResponseResource,
+} from "./response.js";
 import { getResponsesApiRuntime } from "./runtime.js";
 
-// -- HTTP helpers -----------------------------------------------------------
+// -- Constants --------------------------------------------------------------
 
-function getHeader(req: IncomingMessage, name: string): string | undefined {
-  const raw = req.headers[name.toLowerCase()];
-  if (typeof raw === "string") return raw;
-  if (Array.isArray(raw)) return raw[0];
-  return undefined;
-}
+const ENDPOINT_PATH = "/v1/channel/responses";
+const CHANNEL_ID = "responses-api";
+const MAX_BODY_BYTES = 20 * 1024 * 1024;
 
-function getBearerToken(req: IncomingMessage): string | undefined {
-  const raw = getHeader(req, "authorization")?.trim() ?? "";
-  if (!raw.toLowerCase().startsWith("bearer ")) return undefined;
-  const token = raw.slice(7).trim();
-  return token || undefined;
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(body));
-}
-
-function sendMethodNotAllowed(res: ServerResponse, allow = "POST") {
-  res.setHeader("Allow", allow);
-  res.statusCode = 405;
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.end("Method Not Allowed");
-}
-
-function sendUnauthorized(res: ServerResponse) {
-  sendJson(res, 401, { error: { message: "Unauthorized", type: "unauthorized" } });
-}
-
-function setSseHeaders(res: ServerResponse) {
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
-}
-
-function writeSseEvent(res: ServerResponse, event: { type: string; [key: string]: unknown }) {
-  res.write(`event: ${event.type}\n`);
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
-}
-
-function writeDone(res: ServerResponse) {
-  res.write("data: [DONE]\n\n");
-}
-
-async function readJsonBody(
-  req: IncomingMessage,
-  maxBytes: number,
-): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
-  return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on("data", (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        resolve({ ok: false, error: "Request body too large" });
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      try {
-        const raw = Buffer.concat(chunks).toString("utf-8");
-        const parsed: unknown = JSON.parse(raw);
-        resolve({ ok: true, value: parsed });
-      } catch {
-        resolve({ ok: false, error: "Invalid JSON body" });
-      }
-    });
-    req.on("error", (err) => {
-      resolve({ ok: false, error: String(err) });
-    });
-  });
-}
-
-// -- Auth -------------------------------------------------------------------
-
-function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
-function resolveAuthToken(cfg: {
-  gateway?: { auth?: { token?: string; password?: string; mode?: string } };
-}): {
-  mode: "token" | "password";
-  secret: string | undefined;
-} {
-  const authCfg = cfg.gateway?.auth;
-  const token =
-    authCfg?.token ?? process.env.OPENCLAW_GATEWAY_TOKEN ?? process.env.CLAWDBOT_GATEWAY_TOKEN;
-  const password =
-    authCfg?.password ??
-    process.env.OPENCLAW_GATEWAY_PASSWORD ??
-    process.env.CLAWDBOT_GATEWAY_PASSWORD;
-  const mode = (authCfg?.mode ?? (password ? "password" : "token")) as "token" | "password";
-  return { mode, secret: mode === "password" ? password : token };
-}
-
-function authorize(bearerToken: string | undefined, cfg: Record<string, unknown>): boolean {
-  const { secret } = resolveAuthToken(cfg as Parameters<typeof resolveAuthToken>[0]);
-  if (!secret || !bearerToken) return false;
-  return safeEqual(bearerToken, secret);
-}
-
-// -- Agent ID resolution ----------------------------------------------------
-
-function resolveAgentIdFromHeader(req: IncomingMessage): string | undefined {
-  const raw =
-    getHeader(req, "x-openclaw-agent-id")?.trim() ||
-    getHeader(req, "x-openclaw-agent")?.trim() ||
-    "";
-  return raw || undefined;
-}
-
-function resolveAgentIdFromModel(model: string | undefined): string | undefined {
-  const raw = model?.trim();
-  if (!raw) return undefined;
-  const m =
-    raw.match(/^openclaw[:/](?<agentId>[a-z0-9][a-z0-9_-]{0,63})$/i) ??
-    raw.match(/^agent:(?<agentId>[a-z0-9][a-z0-9_-]{0,63})$/i);
-  return m?.groups?.agentId ?? undefined;
-}
-
-function resolveAgentId(req: IncomingMessage, model: string | undefined): string {
-  return resolveAgentIdFromHeader(req) ?? resolveAgentIdFromModel(model) ?? "main";
-}
-
-// -- Input types (Responses API) --------------------------------------------
-
-type ContentPart =
-  | { type: "input_text"; text: string }
-  | { type: "output_text"; text: string }
-  | { type: "text"; text: string }
-  | { type: "input_image"; source: unknown }
-  | { type: "input_file"; source: unknown };
-
-type MessageItem = {
-  type?: "message";
-  role: string;
-  content: string | ContentPart[];
-};
-
-type FunctionCallOutputItem = {
-  type: "function_call_output";
-  call_id: string;
-  output: string;
-};
-
-type ItemParam = MessageItem | FunctionCallOutputItem | { type: string; [key: string]: unknown };
-
-type CreateResponseBody = {
-  model?: unknown;
-  input?: unknown;
-  instructions?: unknown;
-  stream?: unknown;
-  user?: unknown;
-  previous_response_id?: unknown;
-};
-
-function coerceRequest(val: unknown): CreateResponseBody {
-  if (!val || typeof val !== "object") return {};
-  return val as CreateResponseBody;
-}
-
-// -- Input → prompt conversion (mirrors openresponses-http.ts) --------------
-
-function extractTextContent(content: string | ContentPart[] | unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return (content as ContentPart[])
-    .map((part) => {
-      if (typeof part === "string") return part;
-      if (part.type === "input_text" || part.type === "output_text" || part.type === "text") {
-        return (part as { text: string }).text ?? "";
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-/**
- * Convert Responses API `input` (string or ItemParam[]) into a flat prompt.
- * System/developer messages go into `extraSystemPrompt`; the last user
- * message becomes the prompt. Unlike Chat Completions, history is managed
- * server-side via session keys, so we only need the latest user turn.
- */
-function buildPromptFromInput(input: unknown): {
-  message: string;
-  lastUserMessage: string;
-  extraSystemPrompt?: string;
-} {
-  if (typeof input === "string") {
-    return { message: input, lastUserMessage: input };
-  }
-
-  if (!Array.isArray(input)) {
-    return { message: "", lastUserMessage: "" };
-  }
-
-  const items = input as ItemParam[];
-  const systemParts: string[] = [];
-  let lastUserMessage = "";
-
-  for (const item of items) {
-    // Items with a `role` field are messages — `type: "message"` is optional
-    // per the OpenAI Responses API spec.
-    const isMessage = item.type === "message" || (!item.type && "role" in item);
-    if (isMessage) {
-      const msg = item as MessageItem;
-      const content = extractTextContent(msg.content).trim();
-      if (!content) continue;
-
-      if (msg.role === "system" || msg.role === "developer") {
-        systemParts.push(content);
-        continue;
-      }
-
-      if (msg.role === "user") {
-        lastUserMessage = content;
-      }
-    } else if (item.type === "function_call_output") {
-      const fco = item as FunctionCallOutputItem;
-      lastUserMessage = fco.output;
-    }
-  }
-
-  return {
-    message: lastUserMessage,
-    lastUserMessage,
-    extraSystemPrompt: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
-  };
-}
-
-// -- Media URL resolution ---------------------------------------------------
-
-function isRemoteUrl(src: string): boolean {
-  return /^https?:\/\//i.test(src);
-}
-
-function deriveGatewayBaseUrl(req: IncomingMessage): string {
-  const host = req.headers.host || "localhost";
-  return `http://${host}`;
-}
-
-async function resolveMediaUrl(source: string, gatewayBaseUrl: string): Promise<string> {
-  console.log(`[responses-api] resolveMediaUrl source=${source}, isRemote=${isRemoteUrl(source)}`);
-  if (isRemoteUrl(source)) return source;
-  const filePath = source.startsWith("file://") ? source.slice(7) : source;
-  try {
-    const saved = await saveMediaSource(filePath, undefined, "outbound");
-    return `${gatewayBaseUrl}/media/outbound/${saved.id}`;
-  } catch {
-    return source;
-  }
-}
-
-async function resolveMediaUrls(urls: string[], gatewayBaseUrl: string): Promise<string[]> {
-  return Promise.all(urls.map((u) => resolveMediaUrl(u, gatewayBaseUrl)));
-}
-
-/**
- * Extract MEDIA: tokens that the core security filter rejected (absolute/~ paths)
- * but that we can safely resolve for this channel. The core `splitMediaFromOutput`
- * only allows `./relative` paths and http(s):// URLs; everything else stays in the
- * text verbatim. We re-scan the text for those leftover tokens, resolve each via
- * `saveMediaSource`, strip the token lines from the text, and return resolved URLs.
- */
-const MEDIA_LEFTOVER_RE = /^[ \t]*MEDIA:\s*`?([^\n]+?)`?\s*$/gim;
-
-async function extractLeftoverMediaTokens(
-  text: string,
-  gatewayBaseUrl: string,
-): Promise<{ text: string; mediaUrls: string[] }> {
-  const urls: string[] = [];
-  const cleaned = text.replace(MEDIA_LEFTOVER_RE, (match, raw: string) => {
-    const candidate = raw
-      .replace(/^[`"'[{(]+/, "")
-      .replace(/[`"'\\})\],]+$/, "")
-      .trim();
-    // Only handle local paths that the core filter rejected
-    if (!candidate || isRemoteUrl(candidate)) {
-      return match; // leave remote URLs alone (they should have been handled)
-    }
-    const filePath = candidate.startsWith("file://") ? candidate.slice(7) : candidate;
-    // Must look like an absolute or home-relative path
-    if (filePath.startsWith("/") || filePath.startsWith("~")) {
-      urls.push(filePath);
-      return ""; // strip the line
-    }
-    return match; // leave other tokens (e.g. already-valid ./relative) alone
-  });
-
-  if (urls.length === 0) {
-    return { text, mediaUrls: [] };
-  }
-
-  console.log(
-    `[responses-api] extractLeftoverMediaTokens found ${urls.length} absolute paths:`,
-    urls,
-  );
-
-  const resolved = await Promise.all(
-    urls.map(async (filePath) => {
-      try {
-        const saved = await saveMediaSource(filePath, undefined, "outbound");
-        return `${gatewayBaseUrl}/media/outbound/${saved.id}`;
-      } catch {
-        return null;
-      }
-    }),
-  );
-
-  return {
-    text: cleaned.replace(/\n{3,}/g, "\n\n").trim(),
-    mediaUrls: resolved.filter((u): u is string => u !== null),
-  };
-}
-
-// -- Responses API response formatting --------------------------------------
-
-type Usage = { input_tokens: number; output_tokens: number; total_tokens: number };
-
-function createEmptyUsage(): Usage {
-  return { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-}
-
-type OutputItem = {
-  type: "message";
-  id: string;
-  role: "assistant";
-  content: Array<{ type: "output_text"; text: string }>;
-  status?: "in_progress" | "completed";
-};
-
-type ResponseResource = {
-  id: string;
-  object: "response";
-  created_at: number;
-  status: "in_progress" | "completed" | "failed" | "cancelled" | "incomplete";
-  model: string;
-  output: OutputItem[];
-  usage: Usage;
-  error?: { code: string; message: string };
-};
-
-function createResponseResource(params: {
-  id: string;
-  model: string;
-  status: ResponseResource["status"];
-  output: OutputItem[];
-  usage?: Usage;
-  error?: { code: string; message: string };
-}): ResponseResource {
-  return {
-    id: params.id,
-    object: "response",
-    created_at: Math.floor(Date.now() / 1000),
-    status: params.status,
-    model: params.model,
-    output: params.output,
-    usage: params.usage ?? createEmptyUsage(),
-    error: params.error,
-  };
-}
-
-function createAssistantOutputItem(params: {
-  id: string;
-  text: string;
-  status?: "in_progress" | "completed";
-}): OutputItem {
-  return {
-    type: "message",
-    id: params.id,
-    role: "assistant",
-    content: [{ type: "output_text", text: params.text }],
-    status: params.status,
-  };
-}
-
-// -- Media formatting -------------------------------------------------------
-
-function collectMediaUrls(payload: ReplyPayload): string[] {
-  const urls: string[] = [];
-  if (payload.mediaUrls?.length) {
-    urls.push(...payload.mediaUrls.filter(Boolean));
-  } else if (payload.mediaUrl) {
-    urls.push(payload.mediaUrl);
-  }
-  return urls;
-}
+// -- Media helpers (outbound collector) -------------------------------------
 
 /** Extract media URLs from outbound payloads captured by the collector. */
 function capturedOutboundToMediaUrls(captured: CapturedOutbound[]): string[] {
   return captured.flatMap((c) => (c.mediaUrl ? [c.mediaUrl] : []));
 }
 
-function formatMediaAsMarkdown(urls: string[]): string {
-  if (urls.length === 0) return "";
-  return urls.map((url) => `![image](${url})`).join("\n");
-}
-
-async function payloadToContent(payload: ReplyPayload, gatewayBaseUrl: string): Promise<string> {
-  let text = payload.text ?? "";
-  const rawUrls = collectMediaUrls(payload);
-  const resolved = rawUrls.length > 0 ? await resolveMediaUrls(rawUrls, gatewayBaseUrl) : [];
-
-  // Extract MEDIA: tokens that the core security filter rejected (absolute paths)
-  const leftover = await extractLeftoverMediaTokens(text, gatewayBaseUrl);
-  console.log(
-    `[responses-api] payloadToContent: rawUrls=${rawUrls.length}, leftoverMedia=${leftover.mediaUrls.length}, resolved=${resolved.length}`,
-  );
-  text = leftover.text;
-  resolved.push(...leftover.mediaUrls);
-
-  const media = formatMediaAsMarkdown(resolved);
-  if (!text && !media) return "";
-  if (!media) return text;
-  if (!text) return media;
-  return `${text}\n\n${media}`;
-}
-
 // -- Main handler -----------------------------------------------------------
-
-const ENDPOINT_PATH = "/v1/channel/responses";
-const CHANNEL_ID = "responses-api";
-const MAX_BODY_BYTES = 20 * 1024 * 1024;
 
 /**
  * HTTP handler registered via `api.registerHttpHandler()`. Handles
@@ -490,7 +93,7 @@ export async function handleResponsesApiRequest(
   const user = typeof payload.user === "string" ? payload.user : undefined;
   const instructions = typeof payload.instructions === "string" ? payload.instructions : undefined;
 
-  const agentId = resolveAgentId(req, model);
+  const agentId = resolveAgentIdForRequest({ req, model });
   const prompt = buildPromptFromInput(payload.input);
 
   if (!prompt.message) {
@@ -619,10 +222,6 @@ async function handleNonStreaming(params: {
       dispatcherOptions: {
         ...prefixOptions,
         deliver: async (payload: ReplyPayload) => {
-          const urls = collectMediaUrls(payload);
-          console.log(
-            `[responses-api] deliver payload: mediaUrls=${JSON.stringify(urls)}, text=\n---\n${payload.text ?? "(empty)"}\n---`,
-          );
           payloads.push(payload);
         },
         onError: (err: unknown) => {
@@ -636,10 +235,6 @@ async function handleNonStreaming(params: {
 
     // Merge any media captured from the `message send` tool path.
     const captured = collector.drain();
-    console.log(
-      `[responses-api] collector drained: ${captured.length} items`,
-      captured.map((c) => ({ text: c.text?.slice(0, 80), mediaUrl: c.mediaUrl })),
-    );
     const capturedMedia = capturedOutboundToMediaUrls(captured);
 
     const contentParts =
@@ -771,10 +366,10 @@ async function handleStreaming(params: {
     });
   }
 
-  function finish(status: ResponseResource["status"]) {
+  function finish(status: ResponseResource["status"], resolvedText?: string) {
     if (closed) return;
 
-    const finalText = accumulatedText || "No response from OpenClaw.";
+    const finalText = resolvedText || accumulatedText || "No response from OpenClaw.";
 
     writeSseEvent(res, {
       type: "response.output_text.done",
@@ -828,11 +423,9 @@ async function handleStreaming(params: {
       dispatcherOptions: {
         ...prefixOptions,
         deliver: async (payload: ReplyPayload) => {
-          const text = payload.text ?? "";
+          const rawText = payload.text ?? "";
+          const text = stripMediaTokens(rawText);
           const rawUrls = collectMediaUrls(payload);
-          console.log(
-            `[responses-api] streaming deliver: mediaUrls=${JSON.stringify(rawUrls)}, text=\n---\n${text || "(empty)"}\n---`,
-          );
           if (text && text.length > emittedLength) {
             emitDelta(text.slice(emittedLength));
             emittedLength = text.length;
@@ -854,7 +447,7 @@ async function handleStreaming(params: {
       replyOptions: {
         onModelSelected,
         onPartialReply: async (payload) => {
-          const text = payload.text ?? "";
+          const text = stripMediaTokens(payload.text ?? "");
           if (text.length > emittedLength) {
             emitDelta(text.slice(emittedLength));
             emittedLength = text.length;
@@ -873,13 +466,6 @@ async function handleStreaming(params: {
 
     // Emit any media captured from the `message send` tool path.
     const captured = collector.drain();
-    console.log(
-      `[responses-api] streaming collector drained: ${captured.length} items`,
-      captured.map((c) => ({ text: c.text?.slice(0, 80), mediaUrl: c.mediaUrl })),
-    );
-    console.log(
-      `[responses-api] streaming accumulatedText=\n---\n${accumulatedText || "(empty)"}\n---`,
-    );
     const capturedMedia = capturedOutboundToMediaUrls(captured);
 
     // Extract leftover MEDIA: tokens (absolute paths the core filter rejected)
@@ -899,7 +485,13 @@ async function handleStreaming(params: {
       }
     }
 
-    finish("completed");
+    // Resolve markdown image refs with local absolute paths (e.g. ![alt](/mnt/...))
+    // in the accumulated text. The deltas already went out with local paths,
+    // but the final `response.output_text.done` event carries the resolved text
+    // so clients that read the final event get working URLs.
+    const resolvedFinalText = await resolveLocalMarkdownImages(accumulatedText, gatewayBaseUrl);
+
+    finish("completed", resolvedFinalText);
   } catch (err) {
     if (!closed) {
       emitDelta(`Error: ${String(err)}`);
