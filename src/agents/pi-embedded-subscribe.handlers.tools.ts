@@ -371,6 +371,32 @@ export async function handleToolExecutionEnd(
     `embedded run tool end: runId=${ctx.params.runId} tool=${toolName} toolCallId=${toolCallId}`,
   );
 
+  // Always extract MEDIA: tokens from tool results (regardless of verbose level).
+  // The normal emitToolOutput path gates on verbose and wraps output in code fences,
+  // which causes media tokens to be lost. This path bypasses both issues.
+  if (ctx.params.onToolResult && !isToolError) {
+    const rawText = extractToolResultText(sanitizedResult);
+    if (rawText) {
+      const mediaPaths: string[] = [];
+      for (const m of rawText.matchAll(/^[ \t]*MEDIA:\s*(.+?)\s*$/gim)) {
+        const p = m[1]?.trim();
+        if (p) {
+          mediaPaths.push(p);
+        }
+      }
+      if (mediaPaths.length > 0) {
+        ctx.log.debug(
+          `tool result media extraction: tool=${toolName} paths=${JSON.stringify(mediaPaths)}`,
+        );
+        try {
+          void ctx.params.onToolResult({ mediaUrls: mediaPaths });
+        } catch {
+          // ignore delivery failures
+        }
+      }
+    }
+  }
+
   if (ctx.params.onToolResult && ctx.shouldEmitToolOutput()) {
     const outputText = extractToolResultText(sanitizedResult);
     if (outputText) {
