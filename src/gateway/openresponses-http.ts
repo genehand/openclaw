@@ -41,9 +41,17 @@ import {
   buildAgentMessageFromConversationEntries,
   type ConversationEntry,
 } from "./agent-prompt.js";
-import { sendJson, setSseHeaders, writeDone } from "./http-common.js";
-import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
-import { resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
+import { authorizeGatewayConnect, type ResolvedGatewayAuth } from "./auth.js";
+import {
+  readJsonBodyOrError,
+  sendGatewayAuthFailure,
+  sendJson,
+  sendMethodNotAllowed,
+  setSseHeaders,
+  writeDone,
+  writeSseEvent,
+} from "./http-common.js";
+import { getBearerToken, resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
 import {
   CreateResponseBodySchema,
   type ContentPart,
@@ -51,7 +59,6 @@ import {
   type ItemParam,
   type OutputItem,
   type ResponseResource,
-  type StreamingEvent,
   type Usage,
 } from "./open-responses.schema.js";
 
@@ -65,11 +72,6 @@ type OpenResponsesHttpOptions = {
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_URL_PARTS = 8;
-
-function writeSseEvent(res: ServerResponse, event: StreamingEvent) {
-  res.write(`event: ${event.type}\n`);
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
-}
 
 function extractTextContent(content: string | ContentPart[]): string {
   if (typeof content === "string") {
