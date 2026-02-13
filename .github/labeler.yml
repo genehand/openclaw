@@ -252,3 +252,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "extensions/talk-voice/**"
+"extensions: responses-api":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/responses-api/**"
