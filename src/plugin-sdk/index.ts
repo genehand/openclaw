@@ -501,3 +501,16 @@ export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 // Media utilities
 export { loadWebMedia, type WebMediaResult } from "../web/media.js";
+export { saveMediaSource, type SavedMedia } from "../media/store.js";
+
+// Gateway HTTP utilities (shared with channel plugins)
+export { getBearerToken, getHeader, resolveAgentIdForRequest } from "../gateway/http-utils.js";
+export {
+  sendJson,
+  sendMethodNotAllowed,
+  sendUnauthorized,
+  setSseHeaders,
+  writeDone,
+  writeSseEvent,
+} from "../gateway/http-common.js";
+export { readJsonBody } from "../gateway/hooks.js";

@@ -36,7 +36,7 @@ import {
 } from "./agent-prompt.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
-import { sendJson, setSseHeaders, writeDone } from "./http-common.js";
+import { sendJson, setSseHeaders, writeDone, writeSseEvent } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import { resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
 import {
@@ -46,7 +46,6 @@ import {
   type ItemParam,
   type OutputItem,
   type ResponseResource,
-  type StreamingEvent,
   type Usage,
 } from "./open-responses.schema.js";
 
@@ -61,11 +60,6 @@ type OpenResponsesHttpOptions = {
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_URL_PARTS = 8;
-
-function writeSseEvent(res: ServerResponse, event: StreamingEvent) {
-  res.write(`event: ${event.type}\n`);
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
-}
 
 function extractTextContent(content: string | ContentPart[]): string {
   if (typeof content === "string") {

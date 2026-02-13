@@ -55,7 +55,8 @@ import {
   resolveHookDeliver,
 } from "./hooks.js";
 import { sendGatewayAuthFailure, setDefaultSecurityHeaders } from "./http-common.js";
-import { getBearerToken } from "./http-utils.js";
+import { getBearerToken, getHeader } from "./http-utils.js";
+import { ensureMediaCleanup, handleMediaHttpRequest } from "./media-http.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
 import { GATEWAY_CLIENT_MODES, normalizeGatewayClientMode } from "./protocol/client-info.js";
@@ -438,6 +439,7 @@ export function createGatewayHttpServer(opts: {
     resolvedAuth,
     rateLimiter,
   } = opts;
+  ensureMediaCleanup();
   const httpServer: HttpServer = opts.tlsOptions
     ? createHttpsServer(opts.tlsOptions, (req, res) => {
         void handleRequest(req, res);
@@ -467,6 +469,9 @@ export function createGatewayHttpServer(opts: {
         req.url = scopedCanvas.rewrittenUrl;
       }
       const requestPath = new URL(req.url ?? "/", "http://localhost").pathname;
+      if (await handleMediaHttpRequest(req, res)) {
+        return;
+      }
       if (await handleHooksRequest(req, res)) {
         return;
       }
