@@ -1,0 +1,32 @@
+{
+  "name": "@openclaw/responses-api",
+  "version": "2026.2.9",
+  "private": true,
+  "description": "OpenClaw OpenAI Responses API channel plugin with full channel processing",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.26"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "responses-api",
+      "label": "Responses API",
+      "selectionLabel": "OpenAI Responses API (Channel)",
+      "detailLabel": "Responses API Channel",
+      "docsPath": "/channels/responses-api",
+      "docsLabel": "responses-api",
+      "blurb": "OpenAI Responses API endpoint routed through the standard channel pipeline.",
+      "aliases": [
+        "openai-responses",
+        "responses"
+      ],
+      "order": 90
+    }
+  }
+}

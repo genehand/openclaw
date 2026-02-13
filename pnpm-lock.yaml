@@ -472,6 +472,12 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/responses-api:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/signal:
     devDependencies:
       openclaw:
