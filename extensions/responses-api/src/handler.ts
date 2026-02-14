@@ -18,7 +18,7 @@ import {
   type ReplyPayload,
 } from "openclaw/plugin-sdk";
 import { authorize, getBearerToken } from "./auth.js";
-import { coerceRequest, buildPromptFromInput } from "./input.js";
+import { coerceRequest, buildPromptFromInput, extractAttachmentsFromInput } from "./input.js";
 import {
   deriveGatewayBaseUrl,
   resolveMediaUrls,
@@ -136,6 +136,9 @@ export async function handleResponsesApiRequest(
   const agentId = resolveAgentIdForRequest({ req, model });
   const prompt = buildPromptFromInput(payload.input);
 
+  // Extract images and files from input attachments
+  const { images, fileContexts } = await extractAttachmentsFromInput(payload.input);
+
   if (!prompt.message) {
     sendJson(res, 400, {
       error: { message: "Missing user message in `input`.", type: "invalid_request_error" },
@@ -143,8 +146,10 @@ export async function handleResponsesApiRequest(
     return true;
   }
 
-  // Combine instructions with any system prompt from input.
-  const extraSystemPrompt = [instructions, prompt.extraSystemPrompt].filter(Boolean).join("\n\n");
+  // Combine instructions with any system prompt from input, plus file contexts
+  const extraSystemPrompt = [instructions, prompt.extraSystemPrompt, fileContexts.join("\n\n")]
+    .filter(Boolean)
+    .join("\n\n");
 
   const responseId = `resp_${randomUUID()}`;
   const outputItemId = `msg_${randomUUID()}`;
@@ -213,6 +218,7 @@ export async function handleResponsesApiRequest(
       prefixOptions,
       onModelSelected,
       collectorTo: `${CHANNEL_ID}:api`,
+      images,
     });
   }
   return handleStreaming({
@@ -227,6 +233,7 @@ export async function handleResponsesApiRequest(
     prefixOptions,
     onModelSelected,
     collectorTo: `${CHANNEL_ID}:api`,
+    images,
   });
 }
 
@@ -246,6 +253,7 @@ async function handleNonStreaming(params: {
     | ((ctx: { provider: string; model: string; thinkLevel: string | undefined }) => void)
     | undefined;
   collectorTo: string;
+  images?: { type: "image"; data: string; mimeType: string }[];
 }): Promise<true> {
   const {
     req,
@@ -259,6 +267,7 @@ async function handleNonStreaming(params: {
     prefixOptions,
     onModelSelected,
     collectorTo,
+    images,
   } = params;
   const payloads: ReplyPayload[] = [];
   const gatewayBaseUrl = deriveGatewayBaseUrl(req);
@@ -282,7 +291,7 @@ async function handleNonStreaming(params: {
             .error(`Non-streaming reply failed: ${String(err)}`);
         },
       },
-      replyOptions: { onModelSelected },
+      replyOptions: { onModelSelected, images },
     });
 
     // Filter out silent replies (e.g., NO_REPLY)
@@ -351,6 +360,7 @@ async function handleStreaming(params: {
     | ((ctx: { provider: string; model: string; thinkLevel: string | undefined }) => void)
     | undefined;
   collectorTo: string;
+  images?: { type: "image"; data: string; mimeType: string }[];
 }): Promise<true> {
   const {
     req,
@@ -364,6 +374,7 @@ async function handleStreaming(params: {
     prefixOptions,
     onModelSelected,
     collectorTo,
+    images,
   } = params;
 
   setSseHeaders(res);
@@ -505,6 +516,7 @@ async function handleStreaming(params: {
       },
       replyOptions: {
         onModelSelected,
+        images,
         onPartialReply: async (payload) => {
           const rawText = payload.text ?? "";
           // Skip silent replies (e.g., NO_REPLY)
