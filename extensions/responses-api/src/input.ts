@@ -452,51 +452,41 @@ export async function extractAttachmentsFromInput(input: unknown): Promise<{
   const images: ExtractedImageContent[] = [];
   const fileContexts: string[] = [];
 
-  console.log(
-    `[responses] extractAttachmentsFromInput called, input is array: ${Array.isArray(input)}`,
-  );
+  // console.log(
+  //   `[responses] extractAttachmentsFromInput called, input is array: ${Array.isArray(input)}`,
+  // );
 
   if (!Array.isArray(input)) {
-    console.log("[responses] Input is not an array, returning empty");
     return { images, fileContexts };
   }
-
-  console.log(`[responses] Processing ${input.length} input items`);
 
   for (const item of input) {
     // OpenAI Responses API spec uses role field (user, assistant, system, developer)
     const hasRole = "role" in item;
-    console.log(
-      `[responses] Processing item role: ${item?.role}, has content: ${!!item?.content}, content type: ${typeof item?.content}`,
-    );
+    // console.log(
+    //   `[responses] Processing item role: ${item?.role}, has content: ${!!item?.content}, content type: ${typeof item?.content}`,
+    // );
 
     if (!hasRole || typeof item.content === "string") {
-      console.log("[responses] Skipping item - no role field or content is string");
       continue;
     }
 
     const contentParts = item.content as ContentPart[];
-    console.log(`[responses] Processing ${contentParts.length} content parts`);
 
     for (const part of contentParts) {
-      console.log(`[responses] Processing part type: ${part.type}`);
-
       if (part.type === "input_image") {
-        console.log("[responses] Found input_image, extracting...");
         try {
           const image = await extractImageFromPart(
             part as { image_url?: string; source?: unknown },
           );
-          console.log(
-            `[responses] Successfully extracted image: ${image.mimeType}, ${image.data.length} chars of base64`,
-          );
+          // console.log(
+          //   `[responses] Successfully extracted image: ${image.mimeType}, ${image.data.length} chars of base64`,
+          // );
           images.push(image);
         } catch (err) {
           // Log and continue - don't fail the entire request for one bad image
-          console.warn("[responses] Failed to extract image:", err);
         }
       } else if (part.type === "input_file") {
-        console.log("[responses] Found input_file, extracting...");
         try {
           const file = await extractFileFromPart(
             part as {
@@ -512,9 +502,9 @@ export async function extractAttachmentsFromInput(input: unknown): Promise<{
               };
             },
           );
-          console.log(
-            `[responses] Successfully extracted file: ${file.filename}, has text: ${!!file.text}, has images: ${!!file.images?.length}`,
-          );
+          // console.log(
+          //   `[responses] Successfully extracted file: ${file.filename}, has text: ${!!file.text}, has images: ${!!file.images?.length}`,
+          // );
           if (file.text?.trim()) {
             fileContexts.push(`<file name="${file.filename}">\n${file.text}\n</file>`);
           }
@@ -523,14 +513,13 @@ export async function extractAttachmentsFromInput(input: unknown): Promise<{
           }
         } catch (err) {
           // Log and continue - don't fail the entire request for one bad file
-          console.warn("[responses] Failed to extract file:", err);
         }
       }
     }
   }
 
-  console.log(
-    `[responses] Finished extraction: ${images.length} images, ${fileContexts.length} file contexts`,
-  );
+  // console.log(
+  //   `[responses] Finished extraction: ${images.length} images, ${fileContexts.length} file contexts`,
+  // );
   return { images, fileContexts };
 }
