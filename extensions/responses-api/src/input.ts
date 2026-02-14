@@ -302,6 +302,146 @@ async function extractFileFromSource(
 }
 
 /**
+ * Parse a data URL and extract the mime type and base64 data.
+ * Format: data:<mime>;base64,<data>
+ */
+function parseDataUrl(url: string): { mimeType: string; data: string } | null {
+  const match = url.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return { mimeType: match[1], data: match[2] };
+}
+
+/**
+ * Extract image from OpenAI Responses API format.
+ * Supports both image_url (data URI or URL) and legacy source format.
+ */
+async function extractImageFromPart(
+  part: { image_url?: string; source?: unknown },
+  opts?: { maxBytes?: number },
+): Promise<ExtractedImageContent> {
+  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_IMAGE_BYTES;
+
+  // Handle image_url format (official OpenAI Responses API)
+  if (part.image_url) {
+    const imageUrl = part.image_url;
+
+    // Check if it's a data URL
+    const dataUrlMatch = parseDataUrl(imageUrl);
+    if (dataUrlMatch) {
+      const { mimeType, data } = dataUrlMatch;
+      if (!DEFAULT_IMAGE_MIMES.has(mimeType)) {
+        throw new Error(`Unsupported image MIME type: ${mimeType}`);
+      }
+      const buffer = Buffer.from(data, "base64");
+      if (buffer.byteLength > maxBytes) {
+        throw new Error(`Image too large: ${buffer.byteLength} bytes (limit: ${maxBytes})`);
+      }
+      return { type: "image", data, mimeType };
+    }
+
+    // It's a regular URL - fetch it
+    const result = await fetchWithTimeout(imageUrl, { maxBytes, timeoutMs: 30000 });
+    const mimeType = normalizeMimeType(result.mimeType) || "image/png";
+    if (!DEFAULT_IMAGE_MIMES.has(mimeType)) {
+      throw new Error(`Unsupported image MIME type from URL: ${mimeType}`);
+    }
+    return {
+      type: "image",
+      data: result.buffer.toString("base64"),
+      mimeType,
+    };
+  }
+
+  // Handle legacy source format (for backward compatibility)
+  if (part.source) {
+    return extractImageFromSource(
+      part.source as Parameters<typeof extractImageFromSource>[0],
+      opts,
+    );
+  }
+
+  throw new Error("input_image must have 'image_url' or 'source' field");
+}
+
+/**
+ * Extract file from OpenAI Responses API format.
+ * Supports file_url, file_data (base64), or legacy source format.
+ */
+async function extractFileFromPart(
+  part: {
+    file_url?: string;
+    file_data?: string;
+    filename?: string;
+    source?: { type?: string; url?: string; data?: string; media_type?: string; filename?: string };
+  },
+  opts?: { maxBytes?: number; maxChars?: number },
+): Promise<ExtractedFileContent> {
+  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_FILE_BYTES;
+  const maxChars = opts?.maxChars ?? DEFAULT_MAX_FILE_CHARS;
+  const filename = part.filename || "file";
+
+  let buffer: Buffer;
+  let mimeType: string;
+
+  // Handle file_data (base64) format
+  if (part.file_data) {
+    mimeType = "application/octet-stream";
+    buffer = Buffer.from(part.file_data, "base64");
+  }
+  // Handle file_url format
+  else if (part.file_url) {
+    const dataUrlMatch = parseDataUrl(part.file_url);
+    if (dataUrlMatch) {
+      mimeType = dataUrlMatch.mimeType;
+      buffer = Buffer.from(dataUrlMatch.data, "base64");
+    } else {
+      // Regular URL
+      const result = await fetchWithTimeout(part.file_url, { maxBytes, timeoutMs: 30000 });
+      buffer = result.buffer;
+      mimeType = normalizeMimeType(result.mimeType) || "application/octet-stream";
+    }
+  }
+  // Handle legacy source format
+  else if (part.source) {
+    const src = part.source;
+    return extractFileFromSource(
+      {
+        type: src.type === "base64" || src.type === "url" ? src.type : "base64",
+        url: src.url,
+        data: src.data,
+        media_type: src.media_type,
+        filename: src.filename || filename,
+      },
+      { maxBytes, maxChars },
+    );
+  } else {
+    throw new Error("input_file must have 'file_url', 'file_data', or 'source' field");
+  }
+
+  if (buffer.byteLength > maxBytes) {
+    throw new Error(`File too large: ${buffer.byteLength} bytes (limit: ${maxBytes})`);
+  }
+
+  if (!DEFAULT_FILE_MIMES.has(mimeType)) {
+    throw new Error(`Unsupported file MIME type: ${mimeType}`);
+  }
+
+  // Handle PDFs specially
+  if (mimeType === "application/pdf") {
+    return {
+      filename,
+      text: "[PDF content - PDF extraction not implemented]",
+    };
+  }
+
+  // Text files - decode and truncate if needed
+  const text = buffer.toString("utf-8");
+  const truncated = text.length > maxChars ? text.slice(0, maxChars) + "\n[truncated]" : text;
+
+  return { filename, text: truncated };
+}
+
+/**
  * Extract images and files from the OpenResponses input array.
  * Returns extracted images and file contexts for injection into the prompt.
  */
@@ -325,8 +465,8 @@ export async function extractAttachmentsFromInput(input: unknown): Promise<{
     for (const part of contentParts) {
       if (part.type === "input_image") {
         try {
-          const image = await extractImageFromSource(
-            part.source as Parameters<typeof extractImageFromSource>[0],
+          const image = await extractImageFromPart(
+            part as { image_url?: string; source?: unknown },
           );
           images.push(image);
         } catch (err) {
@@ -335,8 +475,19 @@ export async function extractAttachmentsFromInput(input: unknown): Promise<{
         }
       } else if (part.type === "input_file") {
         try {
-          const file = await extractFileFromSource(
-            part.source as Parameters<typeof extractFileFromSource>[0],
+          const file = await extractFileFromPart(
+            part as {
+              file_url?: string;
+              file_data?: string;
+              filename?: string;
+              source?: {
+                type?: string;
+                url?: string;
+                data?: string;
+                media_type?: string;
+                filename?: string;
+              };
+            },
           );
           if (file.text?.trim()) {
             fileContexts.push(`<file name="${file.filename}">\n${file.text}\n</file>`);
