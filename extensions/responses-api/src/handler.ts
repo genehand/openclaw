@@ -101,8 +101,6 @@ export async function handleResponsesApiRequest(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
-  console.log(`[responses] Incoming request: ${req.method} ${req.url}`);
-
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
     if (url.pathname !== ENDPOINT_PATH) return false;
@@ -113,40 +111,70 @@ export async function handleResponsesApiRequest(
     }
 
     // -- Auth -----------------------------------------------------------------
-    console.log("[responses] Getting runtime...");
     const runtime = getResponsesApiRuntime();
-    console.log("[responses] Loading config...");
     const cfg = await runtime.config.loadConfig();
-    console.log("[responses] Checking auth...");
     const bearerToken = getBearerToken(req);
     if (!authorize(bearerToken, cfg as Record<string, unknown>)) {
       sendUnauthorized(res);
       return true;
     }
-    console.log("[responses] Auth passed");
 
     // -- Parse request --------------------------------------------------------
-    console.log("[responses] Reading body...");
+
+    // Check Content-Length header before reading body to give proper error response
+    const contentLength = req.headers["content-length"];
+    const declaredLength =
+      typeof contentLength === "string" ? Number.parseInt(contentLength, 10) : null;
+    if (declaredLength !== null && declaredLength > MAX_BODY_BYTES) {
+      console.log(
+        `[responses] Payload too large: ${declaredLength} bytes (max: ${MAX_BODY_BYTES})`,
+      );
+      // Drain the request body to prevent client "broken pipe" errors
+      req.on("data", () => {});
+      await new Promise<void>((resolve) => {
+        req.on("end", resolve);
+        req.on("close", resolve);
+      });
+      sendJson(res, 413, {
+        error: {
+          message: `Payload too large: ${declaredLength} bytes (max: ${MAX_BODY_BYTES})`,
+          type: "invalid_request_error",
+          code: "payload_too_large",
+        },
+      });
+      return true;
+    }
+
     let bodyResult;
     try {
       bodyResult = await readJsonBody(req, MAX_BODY_BYTES);
-      console.log(`[responses] Body read result: ok=${bodyResult.ok}`);
     } catch (err) {
-      console.error("[responses] Error reading body:", err);
       sendJson(res, 500, { error: { message: "Error reading request body", type: "api_error" } });
       return true;
     }
     if (!bodyResult.ok) {
-      console.log(`[responses] Body read failed: ${bodyResult.error}`);
-      sendJson(res, 400, { error: { message: bodyResult.error, type: "invalid_request_error" } });
+      // Check if it's a payload too large error
+      if (
+        bodyResult.error?.toLowerCase().includes("payload too large") ||
+        bodyResult.error?.toLowerCase().includes("payloadtoolarge")
+      ) {
+        sendJson(res, 413, {
+          error: {
+            message: bodyResult.error,
+            type: "invalid_request_error",
+            code: "payload_too_large",
+          },
+        });
+      } else {
+        sendJson(res, 400, { error: { message: bodyResult.error, type: "invalid_request_error" } });
+      }
       return true;
     }
 
-    console.log("[responses] Body read successfully, parsing...");
     const payload = coerceRequest(bodyResult.value);
-    console.log(
-      `[responses] Parsed request: stream=${payload.stream}, model=${payload.model}, has input=${!!payload.input}`,
-    );
+    // console.log(
+    //   `[responses] Parsed request: stream=${payload.stream}, model=${payload.model}, has input=${!!payload.input}`,
+    // );
     const stream = Boolean(payload.stream);
     const model = typeof payload.model === "string" ? payload.model : "openclaw";
     const user = typeof payload.user === "string" ? payload.user : undefined;
@@ -155,16 +183,14 @@ export async function handleResponsesApiRequest(
     const previousResponseId =
       typeof payload.previous_response_id === "string" ? payload.previous_response_id : undefined;
 
-    console.log("[responses] Resolving agent and building prompt...");
     const agentId = resolveAgentIdForRequest({ req, model });
     const prompt = buildPromptFromInput(payload.input);
 
     // Extract images and files from input attachments
-    console.log("[responses] Extracting attachments...");
     const { images, fileContexts } = await extractAttachmentsFromInput(payload.input);
-    console.log(
-      `[responses] Extraction complete: ${images.length} images, ${fileContexts.length} files`,
-    );
+    // console.log(
+    //   `[responses] Extraction complete: ${images.length} images, ${fileContexts.length} files`,
+    // );
 
     if (!prompt.message) {
       sendJson(res, 400, {
@@ -263,7 +289,6 @@ export async function handleResponsesApiRequest(
       images,
     });
   } catch (err) {
-    console.error("[responses] Unhandled error in request handler:", err);
     if (!res.headersSent) {
       sendJson(res, 500, { error: { message: "Internal server error", type: "api_error" } });
     }
@@ -328,8 +353,6 @@ async function handleNonStreaming(params: {
       replyOptions: { onModelSelected, images },
     });
 
-    console.log(`[responses] Non-streaming dispatch completed, ${payloads.length} payloads`);
-
     // Filter out silent replies (e.g., NO_REPLY)
     const filteredPayloads = payloads.filter((p) => !isSilentReplyText(p.text, SILENT_REPLY_TOKEN));
 
@@ -365,7 +388,6 @@ async function handleNonStreaming(params: {
 
     sendJson(res, 200, response);
   } catch (err) {
-    console.error(`[responses] Non-streaming error: ${String(err)}`, err);
     const response = createResponseResource({
       id: responseId,
       model,
@@ -413,8 +435,6 @@ async function handleStreaming(params: {
     collectorTo,
     images,
   } = params;
-
-  console.log(`[responses] Starting streaming response, images: ${images?.length ?? 0}`);
 
   setSseHeaders(res);
 
@@ -608,7 +628,6 @@ async function handleStreaming(params: {
 
     finish("completed", resolvedFinalText);
   } catch (err) {
-    console.error(`[responses] Streaming error: ${String(err)}`, err);
     if (!closed) {
       emitDelta(`Error: ${String(err)}`);
       finish("failed");
