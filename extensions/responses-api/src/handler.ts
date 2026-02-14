@@ -101,112 +101,154 @@ export async function handleResponsesApiRequest(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
-  const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
-  if (url.pathname !== ENDPOINT_PATH) return false;
+  console.log(`[responses] Incoming request: ${req.method} ${req.url}`);
 
-  if (req.method !== "POST") {
-    sendMethodNotAllowed(res);
-    return true;
-  }
+  try {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
+    if (url.pathname !== ENDPOINT_PATH) return false;
 
-  // -- Auth -----------------------------------------------------------------
-  const runtime = getResponsesApiRuntime();
-  const cfg = await runtime.config.loadConfig();
-  const bearerToken = getBearerToken(req);
-  if (!authorize(bearerToken, cfg as Record<string, unknown>)) {
-    sendUnauthorized(res);
-    return true;
-  }
+    if (req.method !== "POST") {
+      sendMethodNotAllowed(res);
+      return true;
+    }
 
-  // -- Parse request --------------------------------------------------------
-  const bodyResult = await readJsonBody(req, MAX_BODY_BYTES);
-  if (!bodyResult.ok) {
-    sendJson(res, 400, { error: { message: bodyResult.error, type: "invalid_request_error" } });
-    return true;
-  }
+    // -- Auth -----------------------------------------------------------------
+    console.log("[responses] Getting runtime...");
+    const runtime = getResponsesApiRuntime();
+    console.log("[responses] Loading config...");
+    const cfg = await runtime.config.loadConfig();
+    console.log("[responses] Checking auth...");
+    const bearerToken = getBearerToken(req);
+    if (!authorize(bearerToken, cfg as Record<string, unknown>)) {
+      sendUnauthorized(res);
+      return true;
+    }
+    console.log("[responses] Auth passed");
 
-  const payload = coerceRequest(bodyResult.value);
-  const stream = Boolean(payload.stream);
-  const model = typeof payload.model === "string" ? payload.model : "openclaw";
-  const user = typeof payload.user === "string" ? payload.user : undefined;
-  const instructions = typeof payload.instructions === "string" ? payload.instructions : undefined;
-  const previousResponseId =
-    typeof payload.previous_response_id === "string" ? payload.previous_response_id : undefined;
+    // -- Parse request --------------------------------------------------------
+    console.log("[responses] Reading body...");
+    let bodyResult;
+    try {
+      bodyResult = await readJsonBody(req, MAX_BODY_BYTES);
+      console.log(`[responses] Body read result: ok=${bodyResult.ok}`);
+    } catch (err) {
+      console.error("[responses] Error reading body:", err);
+      sendJson(res, 500, { error: { message: "Error reading request body", type: "api_error" } });
+      return true;
+    }
+    if (!bodyResult.ok) {
+      console.log(`[responses] Body read failed: ${bodyResult.error}`);
+      sendJson(res, 400, { error: { message: bodyResult.error, type: "invalid_request_error" } });
+      return true;
+    }
 
-  const agentId = resolveAgentIdForRequest({ req, model });
-  const prompt = buildPromptFromInput(payload.input);
+    console.log("[responses] Body read successfully, parsing...");
+    const payload = coerceRequest(bodyResult.value);
+    console.log(
+      `[responses] Parsed request: stream=${payload.stream}, model=${payload.model}, has input=${!!payload.input}`,
+    );
+    const stream = Boolean(payload.stream);
+    const model = typeof payload.model === "string" ? payload.model : "openclaw";
+    const user = typeof payload.user === "string" ? payload.user : undefined;
+    const instructions =
+      typeof payload.instructions === "string" ? payload.instructions : undefined;
+    const previousResponseId =
+      typeof payload.previous_response_id === "string" ? payload.previous_response_id : undefined;
 
-  // Extract images and files from input attachments
-  const { images, fileContexts } = await extractAttachmentsFromInput(payload.input);
+    console.log("[responses] Resolving agent and building prompt...");
+    const agentId = resolveAgentIdForRequest({ req, model });
+    const prompt = buildPromptFromInput(payload.input);
 
-  if (!prompt.message) {
-    sendJson(res, 400, {
-      error: { message: "Missing user message in `input`.", type: "invalid_request_error" },
+    // Extract images and files from input attachments
+    console.log("[responses] Extracting attachments...");
+    const { images, fileContexts } = await extractAttachmentsFromInput(payload.input);
+    console.log(
+      `[responses] Extraction complete: ${images.length} images, ${fileContexts.length} files`,
+    );
+
+    if (!prompt.message) {
+      sendJson(res, 400, {
+        error: { message: "Missing user message in `input`.", type: "invalid_request_error" },
+      });
+      return true;
+    }
+
+    // Combine instructions with any system prompt from input, plus file contexts
+    const extraSystemPrompt = [instructions, prompt.extraSystemPrompt, fileContexts.join("\n\n")]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const responseId = `resp_${randomUUID()}`;
+    const outputItemId = `msg_${randomUUID()}`;
+    const peerId = user ?? "api-client";
+
+    // -- Resolve agent route --------------------------------------------------
+    const route = runtime.channel.routing.resolveAgentRoute({
+      cfg,
+      channel: CHANNEL_ID,
+      accountId: DEFAULT_ACCOUNT_ID,
+      peer: { kind: "direct", id: peerId },
     });
-    return true;
-  }
 
-  // Combine instructions with any system prompt from input, plus file contexts
-  const extraSystemPrompt = [instructions, prompt.extraSystemPrompt, fileContexts.join("\n\n")]
-    .filter(Boolean)
-    .join("\n\n");
+    // -- Resolve session key (with previous_response_id support) --------------
+    const sessionKey = await resolveSessionKey({
+      routeSessionKey: route.sessionKey,
+      previousResponseId,
+      responseId,
+      agentId: route.agentId,
+    });
 
-  const responseId = `resp_${randomUUID()}`;
-  const outputItemId = `msg_${randomUUID()}`;
-  const peerId = user ?? "api-client";
+    // Store mapping so future requests with this response ID can continue the session
+    // This is fire-and-forget - we don't wait for it to complete
+    void storeSessionMapping(responseId, sessionKey, route.agentId);
 
-  // -- Resolve agent route --------------------------------------------------
-  const route = runtime.channel.routing.resolveAgentRoute({
-    cfg,
-    channel: CHANNEL_ID,
-    accountId: DEFAULT_ACCOUNT_ID,
-    peer: { kind: "direct", id: peerId },
-  });
+    // -- Build MsgContext -----------------------------------------------------
+    const ctx = runtime.channel.reply.finalizeInboundContext({
+      Body: prompt.message,
+      RawBody: prompt.message,
+      CommandBody: prompt.lastUserMessage,
+      BodyForAgent: prompt.message,
+      BodyForCommands: prompt.lastUserMessage,
+      From: `${CHANNEL_ID}:${peerId}`,
+      To: `${CHANNEL_ID}:api`,
+      SessionKey: sessionKey,
+      AccountId: route.accountId,
+      ChatType: "direct",
+      Provider: CHANNEL_ID,
+      Surface: CHANNEL_ID,
+      SenderId: peerId,
+      SenderName: user ?? "API",
+      CommandAuthorized: true,
+      MessageSid: responseId,
+      OriginatingChannel: CHANNEL_ID,
+      OriginatingTo: `${CHANNEL_ID}:api`,
+      GroupSystemPrompt: extraSystemPrompt || undefined,
+    });
 
-  // -- Resolve session key (with previous_response_id support) --------------
-  const sessionKey = await resolveSessionKey({
-    routeSessionKey: route.sessionKey,
-    previousResponseId,
-    responseId,
-    agentId: route.agentId,
-  });
+    const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
+      cfg,
+      agentId: route.agentId,
+      channel: CHANNEL_ID,
+      accountId: route.accountId,
+    });
 
-  // Store mapping so future requests with this response ID can continue the session
-  // This is fire-and-forget - we don't wait for it to complete
-  void storeSessionMapping(responseId, sessionKey, route.agentId);
-
-  // -- Build MsgContext -----------------------------------------------------
-  const ctx = runtime.channel.reply.finalizeInboundContext({
-    Body: prompt.message,
-    RawBody: prompt.message,
-    CommandBody: prompt.lastUserMessage,
-    BodyForAgent: prompt.message,
-    BodyForCommands: prompt.lastUserMessage,
-    From: `${CHANNEL_ID}:${peerId}`,
-    To: `${CHANNEL_ID}:api`,
-    SessionKey: sessionKey,
-    AccountId: route.accountId,
-    ChatType: "direct",
-    Provider: CHANNEL_ID,
-    Surface: CHANNEL_ID,
-    SenderId: peerId,
-    SenderName: user ?? "API",
-    CommandAuthorized: true,
-    MessageSid: responseId,
-    OriginatingChannel: CHANNEL_ID,
-    OriginatingTo: `${CHANNEL_ID}:api`,
-    GroupSystemPrompt: extraSystemPrompt || undefined,
-  });
-
-  const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
-    cfg,
-    agentId: route.agentId,
-    channel: CHANNEL_ID,
-    accountId: route.accountId,
-  });
-
-  if (!stream) {
-    return handleNonStreaming({
+    if (!stream) {
+      return handleNonStreaming({
+        req,
+        res,
+        ctx,
+        cfg,
+        core: runtime,
+        responseId,
+        outputItemId,
+        model,
+        prefixOptions,
+        onModelSelected,
+        collectorTo: `${CHANNEL_ID}:api`,
+        images,
+      });
+    }
+    return handleStreaming({
       req,
       res,
       ctx,
@@ -220,21 +262,13 @@ export async function handleResponsesApiRequest(
       collectorTo: `${CHANNEL_ID}:api`,
       images,
     });
+  } catch (err) {
+    console.error("[responses] Unhandled error in request handler:", err);
+    if (!res.headersSent) {
+      sendJson(res, 500, { error: { message: "Internal server error", type: "api_error" } });
+    }
+    return true;
   }
-  return handleStreaming({
-    req,
-    res,
-    ctx,
-    cfg,
-    core: runtime,
-    responseId,
-    outputItemId,
-    model,
-    prefixOptions,
-    onModelSelected,
-    collectorTo: `${CHANNEL_ID}:api`,
-    images,
-  });
 }
 
 // -- Non-streaming path -----------------------------------------------------
@@ -294,6 +328,8 @@ async function handleNonStreaming(params: {
       replyOptions: { onModelSelected, images },
     });
 
+    console.log(`[responses] Non-streaming dispatch completed, ${payloads.length} payloads`);
+
     // Filter out silent replies (e.g., NO_REPLY)
     const filteredPayloads = payloads.filter((p) => !isSilentReplyText(p.text, SILENT_REPLY_TOKEN));
 
@@ -329,6 +365,7 @@ async function handleNonStreaming(params: {
 
     sendJson(res, 200, response);
   } catch (err) {
+    console.error(`[responses] Non-streaming error: ${String(err)}`, err);
     const response = createResponseResource({
       id: responseId,
       model,
@@ -376,6 +413,8 @@ async function handleStreaming(params: {
     collectorTo,
     images,
   } = params;
+
+  console.log(`[responses] Starting streaming response, images: ${images?.length ?? 0}`);
 
   setSseHeaders(res);
 
@@ -569,6 +608,7 @@ async function handleStreaming(params: {
 
     finish("completed", resolvedFinalText);
   } catch (err) {
+    console.error(`[responses] Streaming error: ${String(err)}`, err);
     if (!closed) {
       emitDelta(`Error: ${String(err)}`);
       finish("failed");
