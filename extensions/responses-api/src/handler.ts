@@ -17,6 +17,11 @@ import {
   type PluginRuntime,
   type ReplyPayload,
 } from "openclaw/plugin-sdk";
+import {
+  createResponseResource,
+  createAssistantOutputItem,
+  type ResponseResource,
+} from "openclaw/plugin-sdk";
 import { authorize, getBearerToken } from "./auth.js";
 import { coerceRequest, buildPromptFromInput, extractAttachmentsFromInput } from "./input.js";
 import {
@@ -30,11 +35,6 @@ import {
   payloadToContent,
 } from "./media.js";
 import { registerOutboundCollector, type CapturedOutbound } from "./outbound.js";
-import {
-  createResponseResource,
-  createAssistantOutputItem,
-  type ResponseResource,
-} from "./response.js";
 import { getResponsesApiRuntime } from "./runtime.js";
 import { lookupSessionKey, storeSessionMapping } from "./session-store.js";
 

@@ -171,6 +171,23 @@ export {
 } from "../infra/http-body.js";
 
 export { fetchWithSsrFGuard } from "../infra/net/fetch-guard.js";
+
+// OpenResponses protocol helpers (shared between core gateway and responses-api extension)
+export {
+  createEmptyUsage,
+  createResponseResource,
+  createAssistantOutputItem,
+  emitResponseStart,
+  emitOutputItemAdded,
+  emitContentPartAdded,
+  emitTextDelta,
+  emitResponseCompleted,
+  extractTextContent,
+  type ContentPart,
+  type ResponseResource,
+  type OutputItem,
+  type Usage,
+} from "../gateway/open-responses.protocol.js";
 export { SsrFBlockedError, isBlockedHostname, isPrivateIpAddress } from "../infra/net/ssrf.js";
 export type { LookupFn, SsrFPolicy } from "../infra/net/ssrf.js";
 export { isWSLSync, isWSL2Sync, isWSLEnv } from "../infra/wsl.js";

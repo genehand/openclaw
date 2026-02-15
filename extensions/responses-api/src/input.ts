@@ -1,3 +1,5 @@
+import { extractTextContent } from "openclaw/plugin-sdk";
+
 // -- Input types (Responses API) --------------------------------------------
 
 export type ContentPart =
@@ -52,22 +54,13 @@ export function coerceRequest(val: unknown): CreateResponseBody {
   return val as CreateResponseBody;
 }
 
-// -- Input → prompt conversion (mirrors openresponses-http.ts) --------------
+// -- Input → prompt conversion ------------------------------------------------
 
-export function extractTextContent(content: string | ContentPart[] | unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return (content as ContentPart[])
-    .map((part) => {
-      if (typeof part === "string") return part;
-      if (part.type === "input_text" || part.type === "output_text" || part.type === "text") {
-        return (part as { text: string }).text ?? "";
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
+// Note: buildPromptFromInput differs from core's buildAgentPrompt because the
+// extension uses session tracking via previous_response_id with persisted store,
+// so it only extracts the latest user message. The core builds full conversation
+// entries for agentCommand. These different approaches serve different execution
+// models and are intentionally kept separate.
 
 /**
  * Convert Responses API `input` (string or ItemParam[]) into a flat prompt.
@@ -98,7 +91,9 @@ export function buildPromptFromInput(input: unknown): {
     const isMessage = item.type === "message" || (!item.type && "role" in item);
     if (isMessage) {
       const msg = item as MessageItem;
-      const content = extractTextContent(msg.content).trim();
+      const content = extractTextContent(
+        msg.content as Parameters<typeof extractTextContent>[0],
+      ).trim();
       if (!content) continue;
 
       if (msg.role === "system" || msg.role === "developer") {

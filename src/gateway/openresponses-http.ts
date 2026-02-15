@@ -53,11 +53,15 @@ import {
 } from "./http-common.js";
 import { getBearerToken, resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
 import {
+  createAssistantOutputItem,
+  createEmptyUsage,
+  createResponseResource,
+  extractTextContent,
+} from "./open-responses.protocol.js";
+import {
   CreateResponseBodySchema,
-  type ContentPart,
   type CreateResponseBody,
   type ItemParam,
-  type OutputItem,
   type ResponseResource,
   type Usage,
 } from "./open-responses.schema.js";
@@ -72,24 +76,6 @@ type OpenResponsesHttpOptions = {
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_URL_PARTS = 8;
-
-function extractTextContent(content: string | ContentPart[]): string {
-  if (typeof content === "string") {
-    return content;
-  }
-  return content
-    .map((part) => {
-      if (part.type === "input_text") {
-        return part.text;
-      }
-      if (part.type === "output_text") {
-        return part.text;
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
 
 type ResolvedResponsesLimits = {
   maxBodyBytes: number;
@@ -242,10 +228,6 @@ function resolveOpenResponsesSessionKey(params: {
   return resolveSessionKey({ ...params, prefix: "openresponses" });
 }
 
-function createEmptyUsage(): Usage {
-  return { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-}
-
 function toUsage(
   value:
     | {
@@ -279,68 +261,6 @@ function extractUsageFromResult(result: unknown): Usage {
     usage as
       | { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number }
       | undefined,
-  );
-}
-
-function createResponseResource(params: {
-  id: string;
-  model: string;
-  status: ResponseResource["status"];
-  output: OutputItem[];
-  usage?: Usage;
-  error?: { code: string; message: string };
-}): ResponseResource {
-  return {
-    id: params.id,
-    object: "response",
-    created_at: Math.floor(Date.now() / 1000),
-    status: params.status,
-    model: params.model,
-    output: params.output,
-    usage: params.usage ?? createEmptyUsage(),
-    error: params.error,
-  };
-}
-
-function createAssistantOutputItem(params: {
-  id: string;
-  text: string;
-  status?: "in_progress" | "completed";
-}): OutputItem {
-  return {
-    type: "message",
-    id: params.id,
-    role: "assistant",
-    content: [{ type: "output_text", text: params.text }],
-    status: params.status,
-  };
-}
-
-async function runResponsesAgentCommand(params: {
-  message: string;
-  images: ImageContent[];
-  clientTools: ClientToolDefinition[];
-  extraSystemPrompt: string;
-  streamParams: { maxTokens: number } | undefined;
-  sessionKey: string;
-  runId: string;
-  deps: ReturnType<typeof createDefaultDeps>;
-}) {
-  return agentCommand(
-    {
-      message: params.message,
-      images: params.images.length > 0 ? params.images : undefined,
-      clientTools: params.clientTools.length > 0 ? params.clientTools : undefined,
-      extraSystemPrompt: params.extraSystemPrompt || undefined,
-      streamParams: params.streamParams ?? undefined,
-      sessionKey: params.sessionKey,
-      runId: params.runId,
-      deliver: false,
-      messageChannel: "webchat",
-      bestEffortDeliver: false,
-    },
-    defaultRuntime,
-    params.deps,
   );
 }
 
