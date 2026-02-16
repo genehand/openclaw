@@ -9,6 +9,7 @@ type ResolveEffectiveMessagesConfig =
   typeof import("../../agents/identity.js").resolveEffectiveMessagesConfig;
 type ResolveHumanDelayConfig = typeof import("../../agents/identity.js").resolveHumanDelayConfig;
 type ResolveAgentRoute = typeof import("../../routing/resolve-route.js").resolveAgentRoute;
+type BuildAgentSessionKey = typeof import("../../routing/resolve-route.js").buildAgentSessionKey;
 type BuildPairingReply = typeof import("../../pairing/pairing-messages.js").buildPairingReply;
 type ReadChannelAllowFromStore =
   typeof import("../../pairing/pairing-store.js").readChannelAllowFromStore;
@@ -230,6 +231,7 @@ export type PluginRuntime = {
     };
     routing: {
       resolveAgentRoute: ResolveAgentRoute;
+      buildAgentSessionKey: BuildAgentSessionKey;
     };
     pairing: {
       buildPairingReply: BuildPairingReply;
