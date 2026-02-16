@@ -272,6 +272,7 @@ export async function handleResponsesApiRequest(
         onModelSelected,
         collectorTo: `${CHANNEL_ID}:api`,
         images,
+        agentId: route.agentId,
       });
     }
     return handleStreaming({
@@ -287,6 +288,7 @@ export async function handleResponsesApiRequest(
       onModelSelected,
       collectorTo: `${CHANNEL_ID}:api`,
       images,
+      agentId: route.agentId,
     });
   } catch (err) {
     if (!res.headersSent) {
@@ -313,6 +315,7 @@ async function handleNonStreaming(params: {
     | undefined;
   collectorTo: string;
   images?: { type: "image"; data: string; mimeType: string }[];
+  agentId?: string;
 }): Promise<true> {
   const {
     req,
@@ -327,6 +330,7 @@ async function handleNonStreaming(params: {
     onModelSelected,
     collectorTo,
     images,
+    agentId,
   } = params;
   const payloads: ReplyPayload[] = [];
   const gatewayBaseUrl = deriveGatewayBaseUrl(req);
@@ -363,13 +367,15 @@ async function handleNonStreaming(params: {
     const contentParts =
       filteredPayloads.length > 0
         ? (
-            await Promise.all(filteredPayloads.map((p) => payloadToContent(p, gatewayBaseUrl)))
+            await Promise.all(
+              filteredPayloads.map((p) => payloadToContent(p, gatewayBaseUrl, cfg, agentId)),
+            )
           ).filter(Boolean)
         : [];
 
     // Append captured media as markdown images.
     if (capturedMedia.length > 0) {
-      const resolved = await resolveMediaUrls(capturedMedia, gatewayBaseUrl);
+      const resolved = await resolveMediaUrls(capturedMedia, gatewayBaseUrl, cfg, agentId);
       const media = formatMediaAsMarkdown(resolved);
       if (media) {
         contentParts.push(media);
@@ -420,6 +426,7 @@ async function handleStreaming(params: {
     | undefined;
   collectorTo: string;
   images?: { type: "image"; data: string; mimeType: string }[];
+  agentId?: string;
 }): Promise<true> {
   const {
     req,
@@ -434,13 +441,14 @@ async function handleStreaming(params: {
     onModelSelected,
     collectorTo,
     images,
+    agentId,
   } = params;
 
   setSseHeaders(res);
 
   let closed = false;
   let accumulatedText = "";
-  let emittedLength = 0;
+  let accumulatedStrippedLength = 0;
   const gatewayBaseUrl = deriveGatewayBaseUrl(req);
 
   req.on("close", () => {
@@ -481,7 +489,6 @@ async function handleStreaming(params: {
   // -- Helper to emit text deltas -------------------------------------------
   function emitDelta(delta: string) {
     if (closed || !delta) return;
-    accumulatedText += delta;
     writeSseEvent(res, {
       type: "response.output_text.delta",
       item_id: outputItemId,
@@ -553,18 +560,22 @@ async function handleStreaming(params: {
           if (isSilentReplyText(rawText, SILENT_REPLY_TOKEN)) {
             return;
           }
-          const text = stripMediaTokens(rawText);
+          // Store the latest raw cumulative text (payloads are cumulative, don't append)
+          accumulatedText = rawText;
           const rawUrls = collectMediaUrls(payload);
-          if (text && text.length > emittedLength) {
-            emitDelta(text.slice(emittedLength));
-            emittedLength = text.length;
-          }
+          // Extract and resolve MEDIA: tokens inline to emit as markdown
           if (rawUrls.length > 0) {
-            const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl);
+            const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl, cfg, agentId);
             const media = formatMediaAsMarkdown(resolved);
             if (media) {
               emitDelta(`\n\n${media}`);
             }
+          }
+          // Emit non-media text (with MEDIA: tokens stripped) incrementally
+          const text = stripMediaTokens(rawText);
+          if (text && text.length > accumulatedStrippedLength) {
+            emitDelta(text.slice(accumulatedStrippedLength));
+            accumulatedStrippedLength = text.length;
           }
         },
         onError: (err: unknown) => {
@@ -582,18 +593,22 @@ async function handleStreaming(params: {
           if (isSilentReplyText(rawText, SILENT_REPLY_TOKEN)) {
             return;
           }
-          const text = stripMediaTokens(rawText);
-          if (text.length > emittedLength) {
-            emitDelta(text.slice(emittedLength));
-            emittedLength = text.length;
-          }
+          // Store the latest raw cumulative text (payloads are cumulative, don't append)
+          accumulatedText = rawText;
           const rawUrls = collectMediaUrls(payload);
+          // Extract and resolve MEDIA: tokens inline to emit as markdown
           if (rawUrls.length > 0) {
-            const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl);
+            const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl, cfg, agentId);
             const media = formatMediaAsMarkdown(resolved);
             if (media) {
               emitDelta(`\n\n${media}`);
             }
+          }
+          // Emit non-media text (with MEDIA: tokens stripped) incrementally
+          const text = stripMediaTokens(rawText);
+          if (text && text.length > accumulatedStrippedLength) {
+            emitDelta(text.slice(accumulatedStrippedLength));
+            accumulatedStrippedLength = text.length;
           }
         },
       },
@@ -605,11 +620,18 @@ async function handleStreaming(params: {
 
     // Extract leftover MEDIA: tokens (absolute paths the core filter rejected)
     // from the accumulated streamed text.
-    const leftover = await extractLeftoverMediaTokens(accumulatedText, gatewayBaseUrl);
+    const leftover = await extractLeftoverMediaTokens(
+      accumulatedText,
+      gatewayBaseUrl,
+      cfg,
+      agentId,
+    );
 
     // Resolve raw captured media URLs (from message send tool) via saveMediaSource
     const resolvedCaptured =
-      capturedMedia.length > 0 ? await resolveMediaUrls(capturedMedia, gatewayBaseUrl) : [];
+      capturedMedia.length > 0
+        ? await resolveMediaUrls(capturedMedia, gatewayBaseUrl, cfg, agentId)
+        : [];
     // leftover.mediaUrls are already resolved gateway URLs
     const allMedia = [...resolvedCaptured, ...leftover.mediaUrls];
 
@@ -624,7 +646,12 @@ async function handleStreaming(params: {
     // in the accumulated text. The deltas already went out with local paths,
     // but the final `response.output_text.done` event carries the resolved text
     // so clients that read the final event get working URLs.
-    const resolvedFinalText = await resolveLocalMarkdownImages(accumulatedText, gatewayBaseUrl);
+    const resolvedFinalText = await resolveLocalMarkdownImages(
+      accumulatedText,
+      gatewayBaseUrl,
+      cfg,
+      agentId,
+    );
 
     finish("completed", resolvedFinalText);
   } catch (err) {
