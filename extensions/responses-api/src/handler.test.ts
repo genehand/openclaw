@@ -86,11 +86,18 @@ function createMockRuntime(overrides?: {
   simulateStreaming?: boolean;
   mediaUrls?: string[];
   partialMediaUrls?: string[];
+  tokens?: Record<string, { agentId: string; label?: string }>;
 }): PluginRuntime {
   return {
     config: {
       loadConfig: vi.fn(async () => ({
-        gateway: { auth: { token: AUTH_TOKEN, mode: "token" } },
+        channels: {
+          "responses-api": {
+            tokens: overrides?.tokens ?? {
+              [AUTH_TOKEN]: { agentId: "main", label: "Test Token" },
+            },
+          },
+        },
       })),
     },
     channel: {
@@ -100,6 +107,9 @@ function createMockRuntime(overrides?: {
           sessionKey: "responses-api:default:api-client:main",
           accountId: "default",
         })),
+        buildAgentSessionKey: vi.fn(({ agentId, channel, accountId, peer }) =>
+          `${channel}:${accountId}:${peer?.id ?? "unknown"}:${agentId}`.toLowerCase(),
+        ),
       },
       reply: {
         finalizeInboundContext: vi.fn((ctx: unknown) => ctx),
@@ -866,10 +876,10 @@ describe("handleResponsesApiRequest", () => {
       const res = createMockResponse();
       await handleResponsesApiRequest(req, res);
 
-      const routeCall = vi.mocked(runtime.channel.routing.resolveAgentRoute).mock.calls[0];
-      expect(routeCall).toBeDefined();
-      const routeArg = routeCall?.[0] as Record<string, unknown>;
-      expect((routeArg.peer as { id: string }).id).toBe("user-123");
+      const sessionKeyCall = vi.mocked(runtime.channel.routing.buildAgentSessionKey).mock.calls[0];
+      expect(sessionKeyCall).toBeDefined();
+      const sessionKeyArg = sessionKeyCall?.[0] as Record<string, unknown>;
+      expect((sessionKeyArg.peer as { id: string }).id).toBe("user-123");
     });
 
     it("only sends the last user message as the prompt (not full history)", async () => {
@@ -1047,7 +1057,7 @@ describe("handleResponsesApiRequest", () => {
 
       // Both requests should use the same session key (derived from first response)
       expect(ctx1.SessionKey).toBe(ctx2.SessionKey);
-      expect(ctx2.SessionKey).toBe(`responses-api:${firstResponseId}`);
+      expect(ctx2.SessionKey).toBe(`agent:main:responses-api:${firstResponseId}`);
     });
 
     it("chains multiple responses in the same session", async () => {
@@ -1157,8 +1167,8 @@ describe("handleResponsesApiRequest", () => {
       const sessionKey2 = (finalizeCalls[1]?.[0] as Record<string, unknown>).SessionKey;
 
       // Each request should have a unique session key based on its response ID
-      expect(sessionKey1).toBe(`responses-api:${body1.id}`);
-      expect(sessionKey2).toBe(`responses-api:${body2.id}`);
+      expect(sessionKey1).toBe(`agent:main:responses-api:${body1.id}`);
+      expect(sessionKey2).toBe(`agent:main:responses-api:${body2.id}`);
       expect(sessionKey1).not.toBe(sessionKey2);
     });
   });
