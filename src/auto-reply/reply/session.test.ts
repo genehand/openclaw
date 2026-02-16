@@ -1083,8 +1083,43 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
     expect(result.sessionEntry.thinkingLevel).toBeUndefined();
   });
 
-  it("archives the old session store entry on /new", async () => {
-    const storePath = await createStorePath("openclaw-archive-old-");
+  it("/new preserves ttsAuto from previous session", async () => {
+    const storePath = await createStorePath("openclaw-reset-tts-");
+    const sessionKey = "agent:main:telegram:dm:user3";
+    const existingSessionId = "existing-session-tts";
+    await seedSessionStoreWithOverrides({
+      storePath,
+      sessionKey,
+      sessionId: existingSessionId,
+      overrides: { ttsAuto: "on" },
+    });
+
+    const cfg = {
+      session: { store: storePath, idleMinutes: 999 },
+    } as OpenClawConfig;
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "/new",
+        RawBody: "/new",
+        CommandBody: "/new",
+        From: "user3",
+        To: "bot",
+        ChatType: "direct",
+        SessionKey: sessionKey,
+        Provider: "telegram",
+        Surface: "telegram",
+      },
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(true);
+    expect(result.sessionEntry.ttsAuto).toBe("on");
+  });
+
+  it("defers archiving on /new reset (resetTriggered=true), archives immediately on idle timeout", async () => {
+    const storePath = await createStorePath("openclaw-archive-defer-");
     const sessionKey = "agent:main:telegram:dm:user-archive";
     const existingSessionId = "existing-session-archive";
     await seedSessionStoreWithOverrides({
@@ -1096,6 +1131,7 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
     const sessionUtils = await import("../../gateway/session-utils.fs.js");
     const archiveSpy = vi.spyOn(sessionUtils, "archiveSessionTranscripts");
 
+    // Test 1: /new reset should defer archiving (resetTriggered=true)
     const cfg = {
       session: { store: storePath, idleMinutes: 999 },
     } as OpenClawConfig;
@@ -1118,10 +1154,46 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
 
     expect(result.isNewSession).toBe(true);
     expect(result.resetTriggered).toBe(true);
+    expect(archiveSpy).not.toHaveBeenCalled();
+
+    // Test 2: idle timeout should archive immediately (resetTriggered=false)
+    archiveSpy.mockClear();
+    const storePath2 = await createStorePath("openclaw-archive-idle-");
+    const sessionKey2 = "agent:main:telegram:dm:user-idle";
+    const existingSessionId2 = "existing-session-idle";
+    await seedSessionStoreWithOverrides({
+      storePath: storePath2,
+      sessionKey: sessionKey2,
+      sessionId: existingSessionId2,
+      overrides: { updatedAt: 1 },
+    });
+
+    const cfg2 = {
+      session: { store: storePath2, idleMinutes: 0 },
+    } as OpenClawConfig;
+
+    const result2 = await initSessionState({
+      ctx: {
+        Body: "hello",
+        RawBody: "hello",
+        CommandBody: "hello",
+        From: "user-idle",
+        To: "bot",
+        ChatType: "direct",
+        SessionKey: sessionKey2,
+        Provider: "telegram",
+        Surface: "telegram",
+      },
+      cfg: cfg2,
+      commandAuthorized: true,
+    });
+
+    expect(result2.isNewSession).toBe(true);
+    expect(result2.resetTriggered).toBe(false);
     expect(archiveSpy).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionId: existingSessionId,
-        storePath,
+        sessionId: existingSessionId2,
+        storePath: storePath2,
         reason: "reset",
       }),
     );

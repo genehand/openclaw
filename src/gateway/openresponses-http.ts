@@ -41,17 +41,9 @@ import {
   buildAgentMessageFromConversationEntries,
   type ConversationEntry,
 } from "./agent-prompt.js";
-import { authorizeGatewayConnect, type ResolvedGatewayAuth } from "./auth.js";
-import {
-  readJsonBodyOrError,
-  sendGatewayAuthFailure,
-  sendJson,
-  sendMethodNotAllowed,
-  setSseHeaders,
-  writeDone,
-  writeSseEvent,
-} from "./http-common.js";
-import { getBearerToken, resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
+import { sendJson, setSseHeaders, writeDone, writeSseEvent } from "./http-common.js";
+import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
+import { resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
 import {
   CreateResponseBodySchema,
   type ContentPart,

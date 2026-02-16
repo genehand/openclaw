@@ -4,6 +4,7 @@ import type {
   CommandHandlerResult,
   HandleCommandsParams,
 } from "./commands-types.js";
+import { archiveSessionTranscripts } from "../../gateway/session-utils.fs.js";
 import { logVerbose } from "../../globals.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
@@ -84,6 +85,17 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
       cfg: params.cfg, // Pass config for LLM slug generation
     });
     await triggerInternalHook(hookEvent);
+
+    // Archive old transcript after hooks have run so they can still read it (#14869).
+    if (params.previousSessionEntry?.sessionId) {
+      archiveSessionTranscripts({
+        sessionId: params.previousSessionEntry.sessionId,
+        storePath: params.storePath,
+        sessionFile: params.previousSessionEntry.sessionFile,
+        agentId: params.agentId,
+        reason: "reset",
+      });
+    }
 
     // Send hook messages immediately if present
     if (hookEvent.messages.length > 0) {
