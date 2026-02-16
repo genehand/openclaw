@@ -1,5 +1,9 @@
 import type { IncomingMessage } from "node:http";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { saveMediaSource, type ReplyPayload } from "openclaw/plugin-sdk";
+import { getAgentScopedMediaLocalRoots } from "../../../src/media/local-roots.js";
 
 // -- URL helpers ------------------------------------------------------------
 
@@ -17,19 +21,73 @@ export function deriveGatewayBaseUrl(req: IncomingMessage): string {
 
 // -- Single / batch URL resolution ------------------------------------------
 
-export async function resolveMediaUrl(source: string, gatewayBaseUrl: string): Promise<string> {
+async function tryResolveRelativePath(
+  filePath: string,
+  cfg: OpenClawConfig,
+  agentId?: string,
+): Promise<string | null> {
+  // If it's already an absolute path, return as-is
+  if (path.isAbsolute(filePath)) {
+    return filePath;
+  }
+
+  // Try to resolve against media local roots
+  const localRoots = agentId ? getAgentScopedMediaLocalRoots(cfg, agentId) : [];
+
+  for (const root of localRoots) {
+    const fullPath = path.join(root, filePath);
+    try {
+      const stat = await fs.stat(fullPath);
+      if (stat.isFile()) {
+        return fullPath;
+      }
+    } catch {
+      // File doesn't exist in this root, try next
+    }
+  }
+
+  return null;
+}
+
+export async function resolveMediaUrl(
+  source: string,
+  gatewayBaseUrl: string,
+  cfg?: OpenClawConfig,
+  agentId?: string,
+): Promise<string> {
   if (isRemoteUrl(source)) return source;
-  const filePath = source.startsWith("file://") ? source.slice(7) : source;
+  let filePath = source.startsWith("file://") ? source.slice(7) : source;
+
+  // Expand ~ to home directory
+  if (filePath.startsWith("~")) {
+    filePath = path.join(process.env.HOME || "/tmp", filePath.slice(1));
+  }
+
+  // If it's a relative path, try to resolve it against media local roots
+  if (!path.isAbsolute(filePath)) {
+    const resolved = await tryResolveRelativePath(filePath, cfg || ({} as OpenClawConfig), agentId);
+    if (resolved) {
+      filePath = resolved;
+    }
+  }
+
   try {
     const saved = await saveMediaSource(filePath, undefined, "outbound");
     return `${gatewayBaseUrl}/media/outbound/${saved.id}`;
-  } catch {
+  } catch (err) {
+    // Log resolution failures to help diagnose path issues
+    console.error(`[responses-api] Failed to resolve media source: ${filePath}`, err);
     return source;
   }
 }
 
-export async function resolveMediaUrls(urls: string[], gatewayBaseUrl: string): Promise<string[]> {
-  return Promise.all(urls.map((u) => resolveMediaUrl(u, gatewayBaseUrl)));
+export async function resolveMediaUrls(
+  urls: string[],
+  gatewayBaseUrl: string,
+  cfg?: OpenClawConfig,
+  agentId?: string,
+): Promise<string[]> {
+  return Promise.all(urls.map((u) => resolveMediaUrl(u, gatewayBaseUrl, cfg, agentId)));
 }
 
 // -- Leftover MEDIA: token extraction ---------------------------------------
@@ -53,18 +111,21 @@ export function stripMediaTokens(text: string): string {
 export async function extractLeftoverMediaTokens(
   text: string,
   gatewayBaseUrl: string,
+  cfg?: OpenClawConfig,
+  agentId?: string,
 ): Promise<{ text: string; mediaUrls: string[] }> {
   const filePaths: string[] = [];
   const cleaned = text.replace(MEDIA_LEFTOVER_RE, (match, raw: string) => {
     const candidate = raw
-      .replace(/^[`"'[{(]+/, "")
-      .replace(/[`"'\\})\],]+$/, "")
+      .replace(/^[\`"'[{(]+/, "")
+      .replace(/[\`"'\}\)\],]+$/, "")
       .trim();
     if (!candidate || isRemoteUrl(candidate)) {
       return match;
     }
     const filePath = candidate.startsWith("file://") ? candidate.slice(7) : candidate;
-    if (filePath.startsWith("/") || filePath.startsWith("~")) {
+    // Accept absolute paths, home paths, and relative paths (to be resolved later)
+    if (filePath.startsWith("/") || filePath.startsWith("~") || !filePath.includes(":")) {
       filePaths.push(filePath);
       return "";
     }
@@ -75,7 +136,7 @@ export async function extractLeftoverMediaTokens(
     return { text, mediaUrls: [] };
   }
 
-  const resolved = await resolveMediaUrls(filePaths, gatewayBaseUrl);
+  const resolved = await resolveMediaUrls(filePaths, gatewayBaseUrl, cfg, agentId);
 
   return {
     text: cleaned.replace(/\n{3,}/g, "\n\n").trim(),
@@ -97,6 +158,8 @@ const MD_IMAGE_LOCAL_RE = /!\[([^\]]*)\]\((\/[^)]+)\)/g;
 export async function resolveLocalMarkdownImages(
   text: string,
   gatewayBaseUrl: string,
+  cfg?: OpenClawConfig,
+  agentId?: string,
 ): Promise<string> {
   const replacements: Array<{ match: string; url: Promise<string>; alt: string }> = [];
   for (const m of text.matchAll(MD_IMAGE_LOCAL_RE)) {
@@ -107,7 +170,7 @@ export async function resolveLocalMarkdownImages(
     replacements.push({
       match: fullMatch,
       alt,
-      url: resolveMediaUrl(localPath, gatewayBaseUrl),
+      url: resolveMediaUrl(localPath, gatewayBaseUrl, cfg, agentId),
     });
   }
 
@@ -148,18 +211,21 @@ export function formatMediaAsMarkdown(urls: string[]): string {
 export async function payloadToContent(
   payload: ReplyPayload,
   gatewayBaseUrl: string,
+  cfg?: OpenClawConfig,
+  agentId?: string,
 ): Promise<string> {
   let text = payload.text ?? "";
   const rawUrls = collectMediaUrls(payload);
-  const resolved = rawUrls.length > 0 ? await resolveMediaUrls(rawUrls, gatewayBaseUrl) : [];
+  const resolved =
+    rawUrls.length > 0 ? await resolveMediaUrls(rawUrls, gatewayBaseUrl, cfg, agentId) : [];
 
   // Extract MEDIA: tokens that the core security filter rejected (absolute paths)
-  const leftover = await extractLeftoverMediaTokens(text, gatewayBaseUrl);
+  const leftover = await extractLeftoverMediaTokens(text, gatewayBaseUrl, cfg, agentId);
   text = leftover.text;
   resolved.push(...leftover.mediaUrls);
 
   // Resolve markdown image refs with local absolute paths (e.g. ![alt](/mnt/...))
-  text = await resolveLocalMarkdownImages(text, gatewayBaseUrl);
+  text = await resolveLocalMarkdownImages(text, gatewayBaseUrl, cfg, agentId);
 
   // Strip any remaining inline MEDIA: tokens that weren't caught by line-anchored extraction
   text = stripMediaTokens(text);
