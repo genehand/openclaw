@@ -200,7 +200,7 @@ export async function initSessionState(params: {
 
   sessionKey = resolveSessionKey(sessionScope, sessionCtxForState, mainKey);
   const entry = sessionStore[sessionKey];
-  const previousSessionEntry = resetTriggered && entry ? { ...entry } : undefined;
+  const previousSessionEntry = entry ? { ...entry } : undefined;
   const now = Date.now();
   const isThread = resolveThreadFlag({
     sessionKey,
@@ -382,7 +382,9 @@ export async function initSessionState(params: {
   );
 
   // Archive old transcript so it doesn't accumulate on disk (#14869).
-  if (previousSessionEntry?.sessionId) {
+  // If this was a deliberate reset (/new or /reset), archiving is handled
+  // later in the command flow to give hooks a chance to read the transcript.
+  if (isNewSession && previousSessionEntry?.sessionId && !resetTriggered) {
     archiveSessionTranscripts({
       sessionId: previousSessionEntry.sessionId,
       storePath,
@@ -452,7 +454,7 @@ export async function initSessionState(params: {
   return {
     sessionCtx,
     sessionEntry,
-    previousSessionEntry,
+    previousSessionEntry: isNewSession ? previousSessionEntry : undefined,
     sessionStore,
     sessionKey,
     sessionId: sessionId ?? crypto.randomUUID(),
