@@ -5,7 +5,6 @@ import {
   createReplyPrefixOptions,
   isSilentReplyText,
   readJsonBody,
-  resolveAgentIdForRequest,
   sendJson,
   sendMethodNotAllowed,
   sendUnauthorized,
@@ -83,7 +82,8 @@ async function resolveSessionKey(params: {
   // No previous_response_id or not found: create a NEW unique session
   // Each response gets its own session key - they only share history
   // when explicitly linked via previous_response_id
-  return `responses-api:${params.responseId}`;
+  // Use agent-prefixed format so getReplyFromConfig can extract the correct agentId
+  return `agent:${params.agentId}:responses-api:${params.responseId}`;
 }
 
 // -- Main handler -----------------------------------------------------------
@@ -114,10 +114,13 @@ export async function handleResponsesApiRequest(
     const runtime = getResponsesApiRuntime();
     const cfg = await runtime.config.loadConfig();
     const bearerToken = getBearerToken(req);
-    if (!authorize(bearerToken, cfg as Record<string, unknown>)) {
+    const authResult = authorize(bearerToken, cfg as Record<string, unknown>);
+    if (!authResult.authorized) {
       sendUnauthorized(res);
       return true;
     }
+    // agentId is determined by the token used for authentication
+    const tokenAgentId = authResult.agentId;
 
     // -- Parse request --------------------------------------------------------
 
@@ -183,7 +186,8 @@ export async function handleResponsesApiRequest(
     const previousResponseId =
       typeof payload.previous_response_id === "string" ? payload.previous_response_id : undefined;
 
-    const agentId = resolveAgentIdForRequest({ req, model });
+    // agentId is determined by the auth token, not from the request model
+    const agentId = tokenAgentId;
     const prompt = buildPromptFromInput(payload.input);
 
     // Extract images and files from input attachments
@@ -208,9 +212,11 @@ export async function handleResponsesApiRequest(
     const outputItemId = `msg_${randomUUID()}`;
     const peerId = user ?? "api-client";
 
-    // -- Resolve agent route --------------------------------------------------
-    const route = runtime.channel.routing.resolveAgentRoute({
-      cfg,
+    // -- Build session key with token's agentId (bypass routing bindings) -----
+    // The session key must contain the correct agentId so getReplyFromConfig
+    // can resolve the right agent from the session key.
+    const baseSessionKey = runtime.channel.routing.buildAgentSessionKey({
+      agentId,
       channel: CHANNEL_ID,
       accountId: DEFAULT_ACCOUNT_ID,
       peer: { kind: "direct", id: peerId },
@@ -218,15 +224,15 @@ export async function handleResponsesApiRequest(
 
     // -- Resolve session key (with previous_response_id support) --------------
     const sessionKey = await resolveSessionKey({
-      routeSessionKey: route.sessionKey,
+      routeSessionKey: baseSessionKey,
       previousResponseId,
       responseId,
-      agentId: route.agentId,
+      agentId,
     });
 
     // Store mapping so future requests with this response ID can continue the session
     // This is fire-and-forget - we don't wait for it to complete
-    void storeSessionMapping(responseId, sessionKey, route.agentId);
+    void storeSessionMapping(responseId, sessionKey, agentId);
 
     // -- Build MsgContext -----------------------------------------------------
     const ctx = runtime.channel.reply.finalizeInboundContext({
@@ -238,7 +244,7 @@ export async function handleResponsesApiRequest(
       From: `${CHANNEL_ID}:${peerId}`,
       To: `${CHANNEL_ID}:api`,
       SessionKey: sessionKey,
-      AccountId: route.accountId,
+      AccountId: DEFAULT_ACCOUNT_ID,
       ChatType: "direct",
       Provider: CHANNEL_ID,
       Surface: CHANNEL_ID,
@@ -253,9 +259,9 @@ export async function handleResponsesApiRequest(
 
     const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
       cfg,
-      agentId: route.agentId,
+      agentId,
       channel: CHANNEL_ID,
-      accountId: route.accountId,
+      accountId: DEFAULT_ACCOUNT_ID,
     });
 
     if (!stream) {
@@ -272,7 +278,7 @@ export async function handleResponsesApiRequest(
         onModelSelected,
         collectorTo: `${CHANNEL_ID}:api`,
         images,
-        agentId: route.agentId,
+        agentId,
       });
     }
     return handleStreaming({
@@ -288,7 +294,7 @@ export async function handleResponsesApiRequest(
       onModelSelected,
       collectorTo: `${CHANNEL_ID}:api`,
       images,
-      agentId: route.agentId,
+      agentId,
     });
   } catch (err) {
     if (!res.headersSent) {
