@@ -21,6 +21,13 @@ Add a `responses-api` section to your `channels` configuration in `openclaw.json
         }
       }
     }
+  },
+  "plugins": {
+    "entries": {
+      "responses-api": {
+        "enabled": true
+      }
+    }
   }
 }
 ```
@@ -39,7 +46,7 @@ Each token in the `tokens` object maps to a specific agent:
 Send requests to the gateway with your token:
 
 ```bash
-curl -X POST http://localhost:3000/v1/channel/responses \
+curl -X POST http://localhost:18789/v1/channel/responses \
   -H "Authorization: Bearer sk-your-token-here" \
   -H "Content-Type: application/json" \
   -d '{
@@ -53,7 +60,7 @@ curl -X POST http://localhost:3000/v1/channel/responses \
 Set `stream: true` for Server-Sent Events:
 
 ```bash
-curl -X POST http://localhost:3000/v1/channel/responses \
+curl -X POST http://localhost:18789/v1/channel/responses \
   -H "Authorization: Bearer sk-your-token-here" \
   -H "Content-Type: application/json" \
   -d '{
@@ -69,13 +76,13 @@ Use `previous_response_id` to continue a conversation:
 
 ```bash
 # First request
-RESPONSE=$(curl -s -X POST http://localhost:3000/v1/channel/responses \
+RESPONSE=$(curl -s -X POST http://localhost:18789/v1/channel/responses \
   -H "Authorization: Bearer sk-your-token-here" \
   -H "Content-Type: application/json" \
   -d '{"model": "openclaw", "input": "Hello"}' | jq -r '.id')
 
 # Follow-up using previous_response_id
-curl -X POST http://localhost:3000/v1/channel/responses \
+curl -X POST http://localhost:18789/v1/channel/responses \
   -H "Authorization: Bearer sk-your-token-here" \
   -H "Content-Type: application/json" \
   -d "{
@@ -108,7 +115,6 @@ The endpoint accepts standard OpenAI Responses API requests:
 
 ## Security
 
-- Tokens are compared using timing-safe equality to prevent timing attacks
 - Each token can only access its configured agent
 - Session mappings are persisted to survive gateway restarts
 

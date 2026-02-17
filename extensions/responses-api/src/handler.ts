@@ -248,7 +248,6 @@ export async function handleResponsesApiRequest(
       ChatType: "direct",
       Provider: CHANNEL_ID,
       Surface: CHANNEL_ID,
-      SenderId: peerId,
       SenderName: user ?? "API",
       CommandAuthorized: true,
       MessageSid: responseId,
@@ -455,7 +454,28 @@ async function handleStreaming(params: {
   let closed = false;
   let accumulatedText = "";
   let accumulatedStrippedLength = 0;
+  let silentReplyDetected = false;
+  let pendingBuffer = ""; // Buffer text that could become a silent reply
   const gatewayBaseUrl = deriveGatewayBaseUrl(req);
+
+  // Helper: check if text could potentially become a silent reply (prefix match)
+  function couldBecomeSilentReply(text: string): boolean {
+    const token = SILENT_REPLY_TOKEN; // "NO_REPLY"
+    // Check if text is a prefix of the token, or token is a prefix of text
+    // This handles cases like: "", "N", "NO", "NO_", etc.
+    const textTrimmed = text.trim().toUpperCase();
+    const tokenUpper = token.toUpperCase();
+
+    // If text is empty or whitespace, it could become anything
+    if (!textTrimmed) return true;
+
+    // If text is a prefix of token, or token is a prefix of text
+    if (tokenUpper.startsWith(textTrimmed) || textTrimmed.startsWith(tokenUpper)) {
+      return true;
+    }
+
+    return false;
+  }
 
   req.on("close", () => {
     closed = true;
@@ -494,7 +514,7 @@ async function handleStreaming(params: {
 
   // -- Helper to emit text deltas -------------------------------------------
   function emitDelta(delta: string) {
-    if (closed || !delta) return;
+    if (closed || !delta || silentReplyDetected) return;
     writeSseEvent(res, {
       type: "response.output_text.delta",
       item_id: outputItemId,
@@ -562,12 +582,26 @@ async function handleStreaming(params: {
         ...prefixOptions,
         deliver: async (payload: ReplyPayload) => {
           const rawText = payload.text ?? "";
-          // Skip silent replies (e.g., NO_REPLY)
+
+          // Check if this is definitely a silent reply - if so, discard buffer and suppress
           if (isSilentReplyText(rawText, SILENT_REPLY_TOKEN)) {
+            silentReplyDetected = true;
+            pendingBuffer = ""; // Discard any buffered text
             return;
           }
+
           // Store the latest raw cumulative text (payloads are cumulative, don't append)
           accumulatedText = rawText;
+
+          // Check if text could still become a silent reply - if so, buffer but don't emit yet
+          if (couldBecomeSilentReply(rawText)) {
+            // Buffer the text instead of emitting
+            pendingBuffer = stripMediaTokens(rawText);
+            accumulatedStrippedLength = pendingBuffer.length;
+            return;
+          }
+
+          // Text is confirmed NOT to be a silent reply - flush buffer and emit
           const rawUrls = collectMediaUrls(payload);
           // Extract and resolve MEDIA: tokens inline to emit as markdown
           if (rawUrls.length > 0) {
@@ -579,9 +613,15 @@ async function handleStreaming(params: {
           }
           // Emit non-media text (with MEDIA: tokens stripped) incrementally
           const text = stripMediaTokens(rawText);
-          if (text && text.length > accumulatedStrippedLength) {
-            emitDelta(text.slice(accumulatedStrippedLength));
+          if (text) {
+            // If we have pending buffer, emit from the start of buffer
+            // Otherwise just emit the delta
+            const startIndex = pendingBuffer ? 0 : accumulatedStrippedLength;
+            if (text.length > startIndex) {
+              emitDelta(text.slice(startIndex));
+            }
             accumulatedStrippedLength = text.length;
+            pendingBuffer = ""; // Clear buffer after emitting
           }
         },
         onError: (err: unknown) => {
@@ -595,12 +635,26 @@ async function handleStreaming(params: {
         images,
         onPartialReply: async (payload) => {
           const rawText = payload.text ?? "";
-          // Skip silent replies (e.g., NO_REPLY)
+
+          // Check if this is definitely a silent reply - if so, discard buffer and suppress
           if (isSilentReplyText(rawText, SILENT_REPLY_TOKEN)) {
+            silentReplyDetected = true;
+            pendingBuffer = ""; // Discard any buffered text
             return;
           }
+
           // Store the latest raw cumulative text (payloads are cumulative, don't append)
           accumulatedText = rawText;
+
+          // Check if text could still become a silent reply - if so, buffer but don't emit yet
+          if (couldBecomeSilentReply(rawText)) {
+            // Buffer the text instead of emitting
+            pendingBuffer = stripMediaTokens(rawText);
+            accumulatedStrippedLength = pendingBuffer.length;
+            return;
+          }
+
+          // Text is confirmed NOT to be a silent reply - flush buffer and emit
           const rawUrls = collectMediaUrls(payload);
           // Extract and resolve MEDIA: tokens inline to emit as markdown
           if (rawUrls.length > 0) {
@@ -612,9 +666,15 @@ async function handleStreaming(params: {
           }
           // Emit non-media text (with MEDIA: tokens stripped) incrementally
           const text = stripMediaTokens(rawText);
-          if (text && text.length > accumulatedStrippedLength) {
-            emitDelta(text.slice(accumulatedStrippedLength));
+          if (text) {
+            // If we have pending buffer, emit from the start of buffer
+            // Otherwise just emit the delta
+            const startIndex = pendingBuffer ? 0 : accumulatedStrippedLength;
+            if (text.length > startIndex) {
+              emitDelta(text.slice(startIndex));
+            }
             accumulatedStrippedLength = text.length;
+            pendingBuffer = ""; // Clear buffer after emitting
           }
         },
       },
@@ -653,7 +713,7 @@ async function handleStreaming(params: {
     // but the final `response.output_text.done` event carries the resolved text
     // so clients that read the final event get working URLs.
     const resolvedFinalText = await resolveLocalMarkdownImages(
-      accumulatedText,
+      leftover.text,
       gatewayBaseUrl,
       cfg,
       agentId,
