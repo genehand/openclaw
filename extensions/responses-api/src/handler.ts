@@ -653,7 +653,7 @@ async function handleStreaming(params: {
     // but the final `response.output_text.done` event carries the resolved text
     // so clients that read the final event get working URLs.
     const resolvedFinalText = await resolveLocalMarkdownImages(
-      accumulatedText,
+      leftover.text,
       gatewayBaseUrl,
       cfg,
       agentId,
