@@ -760,9 +760,9 @@ describe("handleResponsesApiRequest", () => {
       expect(finalText).not.toContain("/mnt/user-data/uploads");
     });
 
-    it("strips inline MEDIA: tokens from streaming text", async () => {
+    it("strips MEDIA: tokens from streaming text", async () => {
       const runtime = createMockRuntime({
-        dispatchResult: "Here is your bee! MEDIA:media_123.jpg",
+        dispatchResult: "Here is your bee!\n\nMEDIA:media_123.jpg",
       });
       setResponsesApiRuntime(runtime);
 
