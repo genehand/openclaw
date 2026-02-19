@@ -78,4 +78,30 @@ export const responsesApiPlugin: ChannelPlugin<ResponsesApiAccount> = {
     },
   },
   // No gateway adapter -- the HTTP handler is registered separately.
+  status: {
+    defaultRuntime: {
+      accountId: DEFAULT_ACCOUNT_ID,
+      running: true,
+      lastStartAt: null,
+      lastStopAt: null,
+      lastError: null,
+    },
+    buildAccountSnapshot: ({ account }) => ({
+      accountId: account.accountId,
+      enabled: account.enabled,
+      configured: true,
+      running: true,
+      lastStartAt: null,
+      lastStopAt: null,
+      lastError: null,
+    }),
+    buildChannelSummary: ({ snapshot }) => ({
+      configured: snapshot.configured ?? false,
+      enabled: snapshot.enabled ?? false,
+      running: snapshot.running ?? false,
+      lastStartAt: snapshot.lastStartAt ?? null,
+      lastStopAt: snapshot.lastStopAt ?? null,
+      lastError: snapshot.lastError ?? null,
+    }),
+  },
 };
