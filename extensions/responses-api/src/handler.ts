@@ -614,14 +614,23 @@ async function handleStreaming(params: {
           // Emit non-media text (with MEDIA: tokens stripped) incrementally
           const text = stripMediaTokens(rawText);
           if (text) {
-            // If we have pending buffer, emit from the start of buffer
-            // Otherwise just emit the delta
-            const startIndex = pendingBuffer ? 0 : accumulatedStrippedLength;
-            if (text.length > startIndex) {
-              emitDelta(text.slice(startIndex));
+            // If we have pending buffer, emit it first as a delta, then continue
+            // with new content. Don't re-emit from index 0 or we'll repeat text.
+            if (pendingBuffer) {
+              // Emit the buffered content first
+              emitDelta(pendingBuffer);
+              // Then emit any new content after the buffer
+              if (text.length > pendingBuffer.length) {
+                emitDelta(text.slice(pendingBuffer.length));
+              }
+              pendingBuffer = ""; // Clear buffer after emitting
+            } else {
+              // No buffer, just emit the delta
+              if (text.length > accumulatedStrippedLength) {
+                emitDelta(text.slice(accumulatedStrippedLength));
+              }
             }
             accumulatedStrippedLength = text.length;
-            pendingBuffer = ""; // Clear buffer after emitting
           }
         },
         onError: (err: unknown) => {
@@ -667,14 +676,23 @@ async function handleStreaming(params: {
           // Emit non-media text (with MEDIA: tokens stripped) incrementally
           const text = stripMediaTokens(rawText);
           if (text) {
-            // If we have pending buffer, emit from the start of buffer
-            // Otherwise just emit the delta
-            const startIndex = pendingBuffer ? 0 : accumulatedStrippedLength;
-            if (text.length > startIndex) {
-              emitDelta(text.slice(startIndex));
+            // If we have pending buffer, emit it first as a delta, then continue
+            // with new content. Don't re-emit from index 0 or we'll repeat text.
+            if (pendingBuffer) {
+              // Emit the buffered content first
+              emitDelta(pendingBuffer);
+              // Then emit any new content after the buffer
+              if (text.length > pendingBuffer.length) {
+                emitDelta(text.slice(pendingBuffer.length));
+              }
+              pendingBuffer = ""; // Clear buffer after emitting
+            } else {
+              // No buffer, just emit the delta
+              if (text.length > accumulatedStrippedLength) {
+                emitDelta(text.slice(accumulatedStrippedLength));
+              }
             }
             accumulatedStrippedLength = text.length;
-            pendingBuffer = ""; // Clear buffer after emitting
           }
         },
       },
