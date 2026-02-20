@@ -61,9 +61,10 @@ export const responsesApiPlugin: ChannelPlugin<ResponsesApiAccount> = {
   },
   security: {
     resolveDmPolicy: () => ({
-      policy: "open",
-      allowFrom: ["*"],
-      allowFromPath: "channels.responses-api.",
+      policy: "pairing",
+      allowFrom: [],
+      policyPath: "channels.responses-api.policy",
+      allowFromPath: "channels.responses-api.allowFrom",
       approveHint: formatPairingApproveHint("responses-api"),
     }),
   },

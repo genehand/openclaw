@@ -574,6 +574,9 @@ async function handleStreaming(params: {
   // the agent sends via the `message send` tool during this request.
   const collector = registerOutboundCollector(collectorTo);
 
+  // Track whether onPartialReply has emitted any text - if so, deliver should not emit text
+  let partialReplyEmitted = false;
+
   try {
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx,
@@ -601,9 +604,8 @@ async function handleStreaming(params: {
             return;
           }
 
-          // Text is confirmed NOT to be a silent reply - flush buffer and emit
+          // Extract and resolve MEDIA: tokens for media emission only
           const rawUrls = collectMediaUrls(payload);
-          // Extract and resolve MEDIA: tokens inline to emit as markdown
           if (rawUrls.length > 0) {
             const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl, cfg, agentId);
             const media = formatMediaAsMarkdown(resolved);
@@ -611,17 +613,30 @@ async function handleStreaming(params: {
               emitDelta(`\n\n${media}`);
             }
           }
-          // Emit non-media text (with MEDIA: tokens stripped) incrementally
-          const text = stripMediaTokens(rawText);
-          if (text) {
-            // If we have pending buffer, emit from the start of buffer
-            // Otherwise just emit the delta
-            const startIndex = pendingBuffer ? 0 : accumulatedStrippedLength;
-            if (text.length > startIndex) {
-              emitDelta(text.slice(startIndex));
+
+          // Only emit text from deliver if onPartialReply hasn't handled streaming.
+          // In streaming mode, onPartialReply handles all text emission; deliver only handles media.
+          if (!partialReplyEmitted) {
+            // Emit non-media text (with MEDIA: tokens stripped) incrementally
+            const text = stripMediaTokens(rawText);
+            if (text) {
+              // If we have pending buffer, we need to emit only the new content
+              // The pendingBuffer is already part of text (text starts with pendingBuffer)
+              if (pendingBuffer) {
+                // Emit only the new content after the buffer
+                if (text.length > pendingBuffer.length) {
+                  emitDelta(text.slice(pendingBuffer.length));
+                }
+                pendingBuffer = ""; // Clear buffer after emitting
+                accumulatedStrippedLength = text.length;
+              } else {
+                // No buffer, just emit the delta
+                if (text.length > accumulatedStrippedLength) {
+                  emitDelta(text.slice(accumulatedStrippedLength));
+                }
+                accumulatedStrippedLength = text.length;
+              }
             }
-            accumulatedStrippedLength = text.length;
-            pendingBuffer = ""; // Clear buffer after emitting
           }
         },
         onError: (err: unknown) => {
@@ -654,9 +669,8 @@ async function handleStreaming(params: {
             return;
           }
 
-          // Text is confirmed NOT to be a silent reply - flush buffer and emit
-          const rawUrls = collectMediaUrls(payload);
           // Extract and resolve MEDIA: tokens inline to emit as markdown
+          const rawUrls = collectMediaUrls(payload);
           if (rawUrls.length > 0) {
             const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl, cfg, agentId);
             const media = formatMediaAsMarkdown(resolved);
@@ -664,17 +678,28 @@ async function handleStreaming(params: {
               emitDelta(`\n\n${media}`);
             }
           }
+
           // Emit non-media text (with MEDIA: tokens stripped) incrementally
           const text = stripMediaTokens(rawText);
           if (text) {
-            // If we have pending buffer, emit from the start of buffer
-            // Otherwise just emit the delta
-            const startIndex = pendingBuffer ? 0 : accumulatedStrippedLength;
-            if (text.length > startIndex) {
-              emitDelta(text.slice(startIndex));
+            // If we have pending buffer, we need to emit only the new content
+            // The pendingBuffer is already part of text (text starts with pendingBuffer)
+            if (pendingBuffer) {
+              // Emit only the new content after the buffer
+              if (text.length > pendingBuffer.length) {
+                emitDelta(text.slice(pendingBuffer.length));
+                partialReplyEmitted = true; // Mark that we've emitted via onPartialReply
+              }
+              pendingBuffer = ""; // Clear buffer after emitting
+              accumulatedStrippedLength = text.length;
+            } else {
+              // No buffer, just emit the delta
+              if (text.length > accumulatedStrippedLength) {
+                emitDelta(text.slice(accumulatedStrippedLength));
+                partialReplyEmitted = true; // Mark that we've emitted via onPartialReply
+              }
+              accumulatedStrippedLength = text.length;
             }
-            accumulatedStrippedLength = text.length;
-            pendingBuffer = ""; // Clear buffer after emitting
           }
         },
       },
