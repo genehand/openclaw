@@ -649,6 +649,45 @@ describe("handleResponsesApiRequest", () => {
       expect(deltaEvents[2].delta).toBe(" three");
     });
 
+    it("does not duplicate text when both onPartialReply and deliver provide content", async () => {
+      // This tests the fix for duplicate responses when streaming pauses and resumes.
+      // The deliver callback is called with the full text after onPartialReply streams it,
+      // but should not emit text again since onPartialReply already handled it.
+      const runtime = createMockRuntime({
+        dispatchResult: "Hello world test",
+        simulateStreaming: true,
+      });
+      setResponsesApiRuntime(runtime);
+
+      const req = createMockRequest(
+        "POST",
+        "/v1/channel/responses",
+        {
+          model: "openclaw",
+          input: [{ type: "message", role: "user", content: "hello" }],
+          stream: true,
+        },
+        { authorization: `Bearer ${AUTH_TOKEN}` },
+      );
+      const res = createMockResponse();
+      await handleResponsesApiRequest(req, res);
+
+      const events = parseSseEvents(res._body);
+      const deltaEvents = events.filter((e) => e.type === "response.output_text.delta");
+
+      // Should have exactly 3 delta events (one per word), not 6 (which would indicate duplication)
+      expect(deltaEvents.length).toBe(3);
+
+      // Verify the deltas combine to the full text
+      const fullText = deltaEvents.map((e) => e.delta).join("");
+      expect(fullText).toBe("Hello world test");
+
+      // Verify the final output_text.done event has the correct full text
+      const doneEvent = events.find((e) => e.type === "response.output_text.done");
+      expect(doneEvent).toBeDefined();
+      expect((doneEvent as unknown as { text: string }).text).toBe("Hello world test");
+    });
+
     it("emits completed response with full text in response.completed", async () => {
       const runtime = createMockRuntime({ dispatchResult: "Full reply" });
       setResponsesApiRuntime(runtime);
