@@ -665,6 +665,55 @@ export function createSandboxedEditTool(params: SandboxToolParams) {
   return wrapToolParamNormalization(base, CLAUDE_PARAM_GROUPS.edit);
 }
 
+/**
+ * When the read tool returns image content blocks, inject a MEDIA: token into
+ * the text block so that `handleToolExecutionEnd` can extract and deliver it.
+ * Without this, the read tool's images are invisible to channels because the
+ * upstream read tool only returns `"Read image file [mime]"` as text — no
+ * MEDIA: token — unlike `imageResult()` used by other tools.
+ */
+function injectMediaTokenForImages(
+  result: AgentToolResult<unknown>,
+  filePath: string,
+): AgentToolResult<unknown> {
+  const content = Array.isArray(result.content) ? result.content : [];
+  const hasImage = content.some(
+    (b) => !!b && typeof b === "object" && (b as { type?: unknown }).type === "image",
+  );
+  if (!hasImage || filePath === "<unknown>") {
+    return result;
+  }
+
+  // Check if there's already a MEDIA: token in any text block
+  const alreadyHasMedia = content.some(
+    (b) =>
+      !!b &&
+      typeof b === "object" &&
+      (b as { type?: unknown }).type === "text" &&
+      typeof (b as { text?: unknown }).text === "string" &&
+      /MEDIA:/i.test((b as { text: string }).text),
+  );
+  if (alreadyHasMedia) {
+    return result;
+  }
+
+  // Prepend MEDIA: token to the first text block (or add one if none exists)
+  const mediaLine = `MEDIA:${filePath}`;
+  const textIdx = content.findIndex(
+    (b) => !!b && typeof b === "object" && (b as { type?: unknown }).type === "text",
+  );
+
+  const nextContent = [...content];
+  if (textIdx >= 0) {
+    const block = nextContent[textIdx] as TextContentBlock & { text: string };
+    nextContent[textIdx] = { ...block, text: `${mediaLine}\n${block.text}` };
+  } else {
+    nextContent.unshift({ type: "text", text: mediaLine } as TextContentBlock);
+  }
+
+  return { ...result, content: nextContent };
+}
+
 export function createOpenClawReadTool(
   base: AnyAgentTool,
   options?: OpenClawReadToolOptions,
@@ -688,8 +737,9 @@ export function createOpenClawReadTool(
       const filePath = typeof record?.path === "string" ? String(record.path) : "<unknown>";
       const strippedDetailsResult = stripReadTruncationContentDetails(result);
       const normalizedResult = await normalizeReadImageResult(strippedDetailsResult, filePath);
+      const withMedia = injectMediaTokenForImages(normalizedResult, filePath);
       return sanitizeToolResultImages(
-        normalizedResult,
+        withMedia,
         `read:${filePath}`,
         options?.imageSanitization,
       );

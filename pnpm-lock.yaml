@@ -388,6 +388,8 @@ importers:
 
   extensions/open-prose: {}
 
+  extensions/responses-api: {}
+
   extensions/signal: {}
 
   extensions/slack: {}
