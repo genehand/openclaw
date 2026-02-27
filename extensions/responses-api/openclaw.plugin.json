@@ -1,0 +1,9 @@
+{
+  "id": "responses-api",
+  "channels": ["responses-api"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

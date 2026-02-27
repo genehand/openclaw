@@ -449,6 +449,7 @@ export type {
 } from "../infra/diagnostic-events.js";
 export { detectMime, extensionForMime, getFileExtension } from "../media/mime.js";
 export { extractOriginalFilename } from "../media/store.js";
+export { openFileWithinRoot, SafeOpenError, type SafeOpenResult } from "../infra/fs-safe.js";
 
 // Channel: Discord
 export {
@@ -591,6 +592,19 @@ export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 // Media utilities
 export { loadWebMedia, type WebMediaResult } from "../web/media.js";
+export { saveMediaSource, type SavedMedia } from "../media/store.js";
+
+// Gateway HTTP utilities (shared with channel plugins)
+export { getBearerToken, getHeader, resolveAgentIdForRequest } from "../gateway/http-utils.js";
+export {
+  sendJson,
+  sendMethodNotAllowed,
+  sendUnauthorized,
+  setSseHeaders,
+  writeDone,
+  writeSseEvent,
+} from "../gateway/http-common.js";
+export { readJsonBody } from "../gateway/hooks.js";
 
 // Security utilities
 export { redactSensitiveText } from "../logging/redact.js";
