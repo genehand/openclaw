@@ -4,19 +4,22 @@ import {
   DEFAULT_ACCOUNT_ID,
   createReplyPrefixOptions,
   isSilentReplyText,
-  readJsonBody,
-  sendJson,
-  sendMethodNotAllowed,
-  sendUnauthorized,
-  setSseHeaders,
   SILENT_REPLY_TOKEN,
-  writeDone,
-  writeSseEvent,
   type OpenClawConfig,
   type PluginRuntime,
   type ReplyPayload,
 } from "openclaw/plugin-sdk";
-import { authorize, getBearerToken } from "./auth.js";
+import { readJsonBody } from "../../../src/gateway/hooks.js";
+import {
+  sendJson,
+  sendMethodNotAllowed,
+  sendUnauthorized,
+  setSseHeaders,
+  writeDone,
+} from "../../../src/gateway/http-common.js";
+import { getBearerToken } from "../../../src/gateway/http-utils.js";
+import type { StreamingEvent } from "../../../src/gateway/open-responses.schema.js";
+import { authorize } from "./auth.js";
 import { coerceRequest, buildPromptFromInput, extractAttachmentsFromInput } from "./input.js";
 import {
   deriveGatewayBaseUrl,
@@ -42,6 +45,11 @@ import { lookupSessionKey, storeSessionMapping } from "./session-store.js";
 const ENDPOINT_PATH = "/v1/channel/responses";
 const CHANNEL_ID = "responses-api";
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
+
+function writeSseEvent(res: ServerResponse, event: StreamingEvent) {
+  res.write(`event: ${event.type}\n`);
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
 
 // -- Media helpers (outbound collector) -------------------------------------
 
@@ -296,6 +304,7 @@ export async function handleResponsesApiRequest(
       agentId,
     });
   } catch (err) {
+    console.error("[responses-api] Handler error:", err);
     if (!res.headersSent) {
       sendJson(res, 500, { error: { message: "Internal server error", type: "api_error" } });
     }
@@ -399,6 +408,7 @@ async function handleNonStreaming(params: {
 
     sendJson(res, 200, response);
   } catch (err) {
+    console.error("[responses-api] Non-streaming error:", err);
     const response = createResponseResource({
       id: responseId,
       model,
@@ -596,16 +606,18 @@ async function handleStreaming(params: {
           // Store the latest raw cumulative text (payloads are cumulative, don't append)
           accumulatedText = rawText;
 
+          // Extract and resolve MEDIA: tokens for media emission only
+          const rawUrls = collectMediaUrls(payload);
+
           // Check if text could still become a silent reply - if so, buffer but don't emit yet
-          if (couldBecomeSilentReply(rawText)) {
+          // BUT only if there are no media URLs to process (media should be emitted immediately)
+          if (rawUrls.length === 0 && couldBecomeSilentReply(rawText)) {
             // Buffer the text instead of emitting
             pendingBuffer = stripMediaTokens(rawText);
             accumulatedStrippedLength = pendingBuffer.length;
             return;
           }
 
-          // Extract and resolve MEDIA: tokens for media emission only
-          const rawUrls = collectMediaUrls(payload);
           if (rawUrls.length > 0) {
             const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl, cfg, agentId);
             const media = formatMediaAsMarkdown(resolved);
@@ -661,16 +673,17 @@ async function handleStreaming(params: {
           // Store the latest raw cumulative text (payloads are cumulative, don't append)
           accumulatedText = rawText;
 
+          // Extract and resolve MEDIA: tokens inline to emit as markdown
+          const rawUrls = collectMediaUrls(payload);
+
           // Check if text could still become a silent reply - if so, buffer but don't emit yet
-          if (couldBecomeSilentReply(rawText)) {
+          // BUT only if there are no media URLs to process (media should be emitted immediately)
+          if (rawUrls.length === 0 && couldBecomeSilentReply(rawText)) {
             // Buffer the text instead of emitting
             pendingBuffer = stripMediaTokens(rawText);
             accumulatedStrippedLength = pendingBuffer.length;
             return;
           }
-
-          // Extract and resolve MEDIA: tokens inline to emit as markdown
-          const rawUrls = collectMediaUrls(payload);
           if (rawUrls.length > 0) {
             const resolved = await resolveMediaUrls(rawUrls, gatewayBaseUrl, cfg, agentId);
             const media = formatMediaAsMarkdown(resolved);
@@ -746,6 +759,7 @@ async function handleStreaming(params: {
 
     finish("completed", resolvedFinalText);
   } catch (err) {
+    console.error("[responses-api] Streaming error:", err);
     if (!closed) {
       emitDelta(`Error: ${String(err)}`);
       finish("failed");

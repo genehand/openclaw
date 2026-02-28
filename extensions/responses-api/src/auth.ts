@@ -1,7 +1,4 @@
 import { timingSafeEqual } from "node:crypto";
-import { getBearerToken, getHeader } from "openclaw/plugin-sdk";
-
-export { getBearerToken, getHeader };
 
 function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;

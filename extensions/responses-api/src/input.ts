@@ -115,10 +115,19 @@ export function buildPromptFromInput(input: unknown): {
     }
   }
 
+  // Append instruction to reference image paths in responses
+  const imageInstruction =
+    "When you use the read tool to view images, always include the image file path in your response using markdown format like ![description](/path/to/image.png). This allows the API to serve the image to the client.";
+  if (systemParts.length > 0) {
+    systemParts.push(imageInstruction);
+  } else {
+    systemParts.push(imageInstruction);
+  }
+
   return {
     message: lastUserMessage,
     lastUserMessage,
-    extraSystemPrompt: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
+    extraSystemPrompt: systemParts.join("\n\n"),
   };
 }
 

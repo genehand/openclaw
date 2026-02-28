@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { SafeOpenError, openFileWithinRoot, type SafeOpenResult } from "openclaw/plugin-sdk";
 import { detectMime } from "openclaw/plugin-sdk";
+import {
+  SafeOpenError,
+  openFileWithinRoot,
+  type SafeOpenResult,
+} from "../../../src/infra/fs-safe.js";
 import { cleanOldMedia, getMediaDir, MEDIA_MAX_BYTES } from "../../../src/media/store.js";
 
 const DEFAULT_TTL_MS = 2 * 60 * 1000;
@@ -101,7 +105,6 @@ export async function handleMediaHttpRequest(
     }
 
     res.statusCode = 200;
-    res.end(data);
 
     // best-effort single-use cleanup after response ends
     res.on("finish", () => {
@@ -109,6 +112,8 @@ export async function handleMediaHttpRequest(
         fs.rm(realPath).catch(() => {});
       }, 50);
     });
+
+    res.end(data);
   } catch (err) {
     if (opened) {
       await opened.handle.close().catch(() => {});

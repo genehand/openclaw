@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { saveMediaSource, type ReplyPayload } from "openclaw/plugin-sdk";
+import { type OpenClawConfig, type ReplyPayload } from "openclaw/plugin-sdk";
 import { getAgentScopedMediaLocalRoots } from "../../../src/media/local-roots.js";
+import { saveMediaSource } from "../../../src/media/store.js";
 
 // -- URL helpers ------------------------------------------------------------
 

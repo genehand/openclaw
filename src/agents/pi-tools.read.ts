@@ -683,10 +683,9 @@ export function createHostWorkspaceEditTool(root: string) {
 
 /**
  * When the read tool returns image content blocks, inject a MEDIA: token into
- * the text block so that `handleToolExecutionEnd` can extract and deliver it.
- * Without this, the read tool's images are invisible to channels because the
- * upstream read tool only returns `"Read image file [mime]"` as text — no
- * MEDIA: token — unlike `imageResult()` used by other tools.
+ * the text block so that channels can extract and deliver it.
+ * Without this, the read tool's images are invisible because the
+ * upstream read tool only returns "Read image file [mime]" as text.
  */
 function injectMediaTokenForImages(
   result: AgentToolResult<unknown>,

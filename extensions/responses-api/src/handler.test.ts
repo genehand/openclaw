@@ -15,14 +15,23 @@ vi.mock("openclaw/plugin-sdk", async (importOriginal) => {
       responsePrefix: undefined,
       responsePrefixContext: undefined,
     })),
-    saveMediaSource: vi.fn(async (filePath: string) => ({
-      id: `resolved-${filePath.split("/").pop()}`,
-      path: `/mock/media/resolved-${filePath.split("/").pop()}`,
-      size: 1024,
-      contentType: "image/png",
-    })),
   };
 });
+
+// Mock saveMediaSource since it's imported from a relative path
+vi.mock("../../../src/media/store.js", () => ({
+  saveMediaSource: vi.fn(async (filePath: string) => ({
+    id: `resolved-${filePath.split("/").pop()}`,
+    path: `/mock/media/resolved-${filePath.split("/").pop()}`,
+    size: 1024,
+    contentType: "image/png",
+  })),
+  saveMediaBuffer: vi.fn(async () => ({
+    id: "mock-buffer-id",
+    path: "/mock/media/buffer",
+    size: 1024,
+  })),
+}));
 
 // -- Test helpers -----------------------------------------------------------
 
@@ -849,7 +858,8 @@ describe("handleResponsesApiRequest", () => {
       const finalizeCall = vi.mocked(runtime.channel.reply.finalizeInboundContext).mock.calls[0];
       expect(finalizeCall).toBeDefined();
       const ctxArg = finalizeCall?.[0] as Record<string, unknown>;
-      expect(ctxArg.GroupSystemPrompt).toBe("Be concise.");
+      expect(ctxArg.GroupSystemPrompt).toContain("Be concise.");
+      expect(ctxArg.GroupSystemPrompt).toContain("read tool");
     });
 
     it("combines instructions with system messages from input", async () => {
@@ -874,7 +884,9 @@ describe("handleResponsesApiRequest", () => {
 
       const finalizeCall = vi.mocked(runtime.channel.reply.finalizeInboundContext).mock.calls[0];
       const ctxArg = finalizeCall?.[0] as Record<string, unknown>;
-      expect(ctxArg.GroupSystemPrompt).toBe("Be brief.\n\nYou are a helper.");
+      expect(ctxArg.GroupSystemPrompt).toContain("Be brief.");
+      expect(ctxArg.GroupSystemPrompt).toContain("You are a helper.");
+      expect(ctxArg.GroupSystemPrompt).toContain("read tool");
     });
 
     it("sets CommandAuthorized to true", async () => {
@@ -1046,7 +1058,8 @@ describe("handleResponsesApiRequest", () => {
       expect(res.statusCode).toBe(200);
       const finalizeCall = vi.mocked(runtime.channel.reply.finalizeInboundContext).mock.calls[0];
       const ctxArg = finalizeCall?.[0] as Record<string, unknown>;
-      expect(ctxArg.GroupSystemPrompt).toBe("Be concise.");
+      expect(ctxArg.GroupSystemPrompt).toContain("Be concise.");
+      expect(ctxArg.GroupSystemPrompt).toContain("read tool");
       expect(ctxArg.Body).toBe("Hello");
     });
 

@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/responses-api",
-  "version": "2026.2.22",
+  "version": "2026.2.26",
   "private": true,
   "description": "OpenClaw OpenAI Responses API channel plugin with full channel processing",
   "type": "module",
@@ -8,7 +8,7 @@
     "openclaw": "workspace:*"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.2.22"
+    "openclaw": ">=2026.2.26"
   },
   "openclaw": {
     "extensions": [
